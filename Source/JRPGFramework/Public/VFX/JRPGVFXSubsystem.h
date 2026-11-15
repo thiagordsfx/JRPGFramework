@@ -62,6 +62,8 @@ struct FJRPGVFXInstance
 	/** StopEffect suave pedido: o efeito some em FadeOutTime. */
 	bool bStopping = false;
 	float StopElapsed = 0.0f;
+	/** StopEffect suave pedido antes do MinPlayTime da receita: o fade começa quando Elapsed chegar lá. */
+	bool bStopQueued = false;
 };
 
 /**
@@ -169,6 +171,8 @@ private:
 	/** Deixa o corpo no valor final das faixas e devolve o componente (bImmediate: as partículas vivas somem junto). */
 	void EndLayer(FJRPGVFXInstance& Instance, int32 LayerIndex, bool bImmediate);
 	void EndInstance(FJRPGVFXInstance& Instance, bool bImmediate);
+	/** Começa o fade de um StopEffect suave: o Niagara para de emitir, o resto some em FadeOutTime. */
+	void BeginSoftStop(FJRPGVFXInstance& Instance);
 	void ReleaseComponent(FJRPGVFXLayerState& State, bool bImmediate);
 
 	/** O tempo 0..1 da camada no instante Elapsed do efeito. */

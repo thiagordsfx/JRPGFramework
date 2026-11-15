@@ -52,6 +52,7 @@ Create one in the Content Browser: **Miscellaneous › Data Asset › JRPGVFXRec
 | `Duration` | Length of the effect in seconds. `0` = the end of the last layer that has its own duration |
 | `bLooping` | The effect stays until `StopEffect` (an aura, a status). See [Looping](#looping-and-stopping) |
 | `FadeOutTime` | On a soft stop, how long the effect takes to disappear |
+| `MinPlayTime` | The least the effect plays: a soft stop asked earlier waits until then before fading. An immediate stop does not wait. `0` = none |
 | `FadeParameter` | The scalar the `Mesh` layers' materials receive during the fade (`JRPGVFXFade`, 1 → 0) |
 | `Layers` | The layers, in any order |
 
@@ -183,30 +184,23 @@ The first effects wired into the fight. When a hero's Spirit step starts, `AJRPG
 `DT_VFX` row `Spirit_<Key>` (`Spirit_Vahn`, `Spirit_Noa`, `Spirit_Gala`) on itself, and stops it softly when
 the action ends (or at once if the pawn leaves the world). A hero with no row only logs the warning.
 
-| Row | Recipe | Niagara system | Element |
-|---|---|---|---|
-| `Spirit_Vahn` | `VFX_Spirit_Vahn` | `NS_Spirit_Vahn` | Fire: flame swirls, embers, smoke |
-| `Spirit_Noa` | `VFX_Spirit_Noa` | `NS_Spirit_Noa` | Wind: green spiral, smoke, sparks |
-| `Spirit_Gala` | `VFX_Spirit_Gala` | `NS_Spirit_Gala` | Thunder: lightning sprites swirling up a cylinder |
+The three rows play the VFX Lab port ([From the VFX Lab](#from-the-vfx-lab-the-spirit-charge)), one
+recipe per hero with the palette in colour tracks:
 
-All in `/Game/Legaia/VFX/Spirit/`. Each recipe is looping, one Niagara layer anchored at the hero's feet
-(`BoundsBottom`, attached), `FadeOutTime` 0.6. The context colour is left white, so each system keeps its
-own HDR colour.
+| Row | Recipe | Lab palette |
+|---|---|---|
+| `Spirit_Vahn` | `VFX_SpiritCharge_Vahn` | "Furia vermelha" |
+| `Spirit_Noa` | `VFX_SpiritCharge_Noa` | "Vento verde" |
+| `Spirit_Gala` | `VFX_SpiritCharge_Gala` | "Chakra azul" |
 
-The systems are duplicates of systems from two free packs in the host project (`/Game/_ThidParty/Free_Magic`
-and `Free_Spells`) with three layers of ours added: `JRPG_Stars` (four-pointed stars rising and twinkling,
-`M_VFX_SpiritStar`) and `JRPG_Gather` (streaks pulled into the chest, `M_VFX_SpiritStreak`). Deleting those
-packs breaks the three systems. Changes made to the pack layers:
+All in `/Game/Legaia/VFX/SpiritCharge/`, looping, `FadeOutTime` 1 s. The aura lasts as long as the hero's
+`Spirit` clip, which is short for Gala (1.8 s at rate 2 ≈ 0.9 s, against ≈ 1.6 s for Vahn and ≈ 1.9 s for
+Noa), so `VFX_SpiritCharge_Gala` has `MinPlayTime` 1.8: the action still ends on the original's frame, only
+the aura stays. The context colour is left white, so each recipe's colour tracks decide the palette.
 
-- Their emitters were `Once` with `Life Cycle Mode: Self`: they play one pass and the system restarts only
-  when every emitter has finished. Our infinite layers keep the system alive, so the pack layers would play
-  once and go dark. They are set to `Infinite` with a 5 s loop.
-- `User.Scale_All` sizes the whole pack part (Vahn 0.75, Noa 0.7, Gala 0.6).
-- Gala: the `Ray` emitter removed; the lightning sprites (`Sparks2`) are born on a cylinder and turned and
-  lifted every frame by a `SetParameters` HLSL expression. That emitter simulates in **local space**, so the
-  expression works around (0,0,0), not the owner's position.
-
-What was learned from the packs, for the next effects:
+The first version of these auras (`VFX_Spirit_<Key>`, duplicates of systems from two free packs in
+`/Game/_ThidParty/`) was deleted when the Lab port replaced it. What was learned from those packs, for the
+next effects:
 
 - **Saturated HDR colours with the opposite channels at zero** (fire `(100, 15, 0)`). This keeps the
   colour alive over a bright background; a low colour mixed toward white goes pastel.
@@ -214,7 +208,84 @@ What was learned from the packs, for the next effects:
 - **Two noise textures**: one panning along a spiral mesh, the other distorting it; a 4-channel Dynamic
   Parameter driven by Niagara (erosion over life, a mask sweeping along the mesh, a random offset, contrast).
 - **Flipbooks** for volume: smoke 8×8, flames 2×2, lightning 3×3.
-- The engine MCP cannot copy one emitter out of another system, so a pack system is used whole, duplicated.
+- Pack emitters set to `Once` with `Life Cycle Mode: Self` play one pass and go dark when another emitter
+  keeps the system alive; they need `Infinite`.
+- The engine MCP cannot copy one emitter out of another system; a pack system can only be used whole.
+
+### From the VFX Lab: the Spirit charge
+
+Effects are written first in the **VFX Lab** (`D:\JOGOS\VFXTest`, outside this repo): one `.ush` per
+effect, previewed in the browser and checked with `fxc`, and a scene JSON (`scenes/Spirit.json`) that stacks
+them on meshes and particle layers around a dummy, entrance included (Reiniciar replays it). The Lab is the
+source of truth; the Unreal assets are a port. `python -m vfxlab export` writes each effect's Custom node
+code; `vfxlab.scenes.export_scene` writes the cone OBJs and a `LEIAME.md` with every number below
+(meshes, World Position Offset formula, each emitter's motion, the entrance tracks).
+
+The port of the `Spirit` scene lives in `/Game/Legaia/VFX/SpiritCharge/`:
+
+| Lab layer | Unreal | Notes |
+|---|---|---|
+| `Chao` (`SpiritGround`, plane) | `M_SpiritGround` on `/Engine/BasicShapes/Plane`, scale 5, 2 cm up | Flat |
+| `ChaoSaia` (`SpiritAura`, low wide cone) | `MI_SpiritAura_Saia` on `SM_SpiritSaia` (55 → 230 cm radius, 110 cm) | WPO waves |
+| `Aura` (`SpiritAura`, cone) | `MI_SpiritAura_Main` on `SM_SpiritAura` (60 → 162 cm, 384 cm) | WPO waves + sway |
+| `AuraVolume` (`SpiritAura`, outer cone) | `MI_SpiritAura_Volume` on `SM_SpiritAuraVolume` (78 → 195 cm, 330 cm) | Weaker, other phase |
+| 11 particle layers | 11 emitters of `NS_SpiritCharge`, same names as the Lab layers | All **GPU Compute** |
+
+Particle materials: `M_SpiritSpark` (sparks, streaks), `M_SpiritStar`, `M_SpiritOrb` (the orbs),
+`M_SpiritWisp` (energy tongues escaping the cone and the ground), `M_SpiritSmoke` (dust, Translucent).
+
+**Recipes.** `VFX_SpiritCharge` (default palette) and `VFX_SpiritCharge_Vahn` / `_Noa` / `_Gala`, which add
+colour tracks `ColorCore` / `ColorMain` / `ColorEdge` on every layer; the `Spirit_<Key>` rows of `DT_VFX`
+play the hero copies. Looping, `FadeOutTime` 1. Each mesh is two layers: `<Name>Entrada` with its own
+`Duration` and a track `Reveal` 0 → 1 `EaseOut` (the same curve as the Lab's `out`), then `<Name>`
+starting when it ends, looping, `Reveal` held at 1 (a pooled mesh can come back with the value an
+interrupted entrance left). The entrance layer comes first in the list, so on the swap tick it is released
+and the loop layer starts on the same frame; the materials read global time, so the image does not jump.
+Ground 0.8 s, skirt 0.6 s, cone 1.0 s, outer cone 0.1 s late and 1.1 s long. Try a recipe in PIE with
+`JRPG.VFX.Play /Game/Legaia/VFX/SpiritCharge/VFX_SpiritCharge`.
+
+**Materials.** Unlit; Additive except the dust. The Custom node holds the exported code inline (no include,
+no rebuild), `Output Type` Float 4: RGB → Emissive, A → Opacity (UE's Additive adds `Emissive × Opacity`,
+the Lab's `SRC_ALPHA, ONE`). `Reveal` and `Seed` live inside the `.ush`; mesh materials multiply the
+opacity by `JRPGVFXFade` and `Opacity` (0.9 on the cones); sprite materials multiply by `Particle Color`
+(the Lab's `vColor`). The effect inputs `ParticleAge` and `ParticleRandom` are per particle: Dynamic
+Parameter `Param1` (Niagara writes `Particles.NormalizedAge`) and Particle Random
+(`Particles.MaterialRandom`). `T_SpiritNoise`: sRGB off, `TC_Masks`, sampler `SAMPLERTYPE_Masks`.
+
+**Cone World Position Offset.** `M_SpiritAura` has a second Custom node (code in the Lab scene's
+`LEIAME.md`) fed by UV, Time and Local Position, transformed local → world. Parameters `Wobble` (lumps),
+`Wave` (ripples travelling up the wall), `Sway` (the whole cone leaning, metres at the top), `WobbleSpeed`,
+`Phase`; all 0 in the parent, set per layer in the three `MI_SpiritAura_*` instances. The cone meshes have
+bounds extensions so the swaying top is not culled.
+
+**Particles.** Every emitter is GPU Compute, local space, fixed bounds (±450 × ±450, −50 → 700 cm). No
+forces: `SetParameters` modules with HLSL expressions reproduce the Lab's `VS_PART`. Spawn hashes
+`Particles.MaterialRandom` into two random `float4`s and picks angle, radius, height, speed, distance and
+size; update recomputes position and velocity per motion:
+
+| Lab `motion` | Position |
+|---|---|
+| `rise` | ring radius × (1 + spread × age), height + speed × time |
+| `cone` | on the `Aura` cone wall: radius `(60 + 102 × h^1.5) × k` at the current height |
+| `ground` | out over the floor: `r0 + D × a(2 − a)` (an ease out, like the ground's `Reveal`), plus a rise |
+| `coneOut` | born on the cone wall, escaping outwards and upwards at constant speed |
+
+Stretched sprites are Velocity Aligned (`SpriteSize.y` = length). Alpha is `smoothstep(0, f0) ×
+(1 − smoothstep(f1, 1))` per layer. Lab `burst` layers are `Once` emitters (`Life Cycle Mode: Self`,
+`SpawnBurst_Instantaneous`) fired when the pooled component activates; a Lab `delay` on a continuous layer
+is `SpawnRate = rate × step(delay, Emitter.Age)`. The sprite renderers bind `User.ColorCore` /
+`User.ColorMain` / `User.ColorEdge` to the material parameters of the same name, so the recipe's colour
+tracks recolour meshes and particles together.
+
+Traps found while porting:
+
+- The Niagara CPU VM has **no `smoothstep`** in HLSL expressions; the expressions write `t*t*(3-2t)` with
+  `saturate` so they stay valid on either target.
+- The editor viewport barely ticks Niagara while the editor window is unfocused: judge particles in
+  Simulate or PIE, not in the idle viewport.
+- Over the MCP, a Custom node's `Inputs` (and a recipe's `Layers`) cannot grow and change in the same
+  `set_properties`; empty or grow first, then set. A Dynamic Parameter output only connects after its output
+  names were queried once.
 
 ---
 

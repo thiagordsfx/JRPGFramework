@@ -39,6 +39,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recipe", meta = (ClampMin = "0.0"))
 	float FadeOutTime = 0.25f;
 
+	/**
+	 * O mínimo que o efeito toca antes de sumir, em segundos. Um StopEffect suave pedido antes disto espera até aqui e só então
+	 * começa o FadeOutTime (uma aura que não pode piscar quando a ação de quem a tem é curta, como o Spirit do Gala). O StopEffect
+	 * imediato não espera. 0 = some quando pedido.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recipe", meta = (ClampMin = "0.0"))
+	float MinPlayTime = 0.0f;
+
 	/** O parâmetro escalar que os materiais das camadas Mesh recebem durante o FadeOutTime (1 = inteiro, 0 = sumiu). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recipe")
 	FName FadeParameter = TEXT("JRPGVFXFade");

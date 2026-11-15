@@ -215,18 +215,32 @@ void UJRPGVFXSubsystem::StopEffect(FJRPGVFXHandle Handle, bool bImmediate)
 		}
 		else if (!Instance.bStopping)
 		{
-			Instance.bStopping = true;
-			Instance.StopElapsed = 0.0f;
-			// O Niagara para de emitir já e as partículas vivas terminam sozinhas; o resto some no fade
-			for (int32 Layer = 0; Layer < Instance.Layers.Num(); ++Layer)
+			// Cedo demais para a receita: o fade espera o MinPlayTime (o Tick começa quando chegar)
+			if (Instance.Elapsed < Instance.Recipe->MinPlayTime)
 			{
-				if (Instance.Recipe->Layers[Layer].Type == EJRPGVFXLayerType::Niagara)
-				{
-					EndLayer(Instance, Layer, false);
-				}
+				Instance.bStopQueued = true;
+			}
+			else
+			{
+				BeginSoftStop(Instance);
 			}
 		}
 		return;
+	}
+}
+
+void UJRPGVFXSubsystem::BeginSoftStop(FJRPGVFXInstance& Instance)
+{
+	Instance.bStopQueued = false;
+	Instance.bStopping = true;
+	Instance.StopElapsed = 0.0f;
+	// O Niagara para de emitir já e as partículas vivas terminam sozinhas; o resto some no fade
+	for (int32 Layer = 0; Layer < Instance.Layers.Num(); ++Layer)
+	{
+		if (Instance.Recipe->Layers[Layer].Type == EJRPGVFXLayerType::Niagara)
+		{
+			EndLayer(Instance, Layer, false);
+		}
 	}
 }
 
@@ -316,6 +330,10 @@ void UJRPGVFXSubsystem::Tick(float DeltaTime)
 		for (TPair<FName, FJRPGVFXFloatParam>& Param : Instance.FloatParams)
 		{
 			Param.Value.Elapsed += DeltaTime;
+		}
+		if (Instance.bStopQueued && Instance.Elapsed >= Recipe->MinPlayTime)
+		{
+			BeginSoftStop(Instance);
 		}
 		float Fade = 1.0f;
 		if (Instance.bStopping)
