@@ -450,6 +450,55 @@ More traps found here:
   template copies it whole. Copying `NS_SpiritCharge` and rewriting its emitters is faster than building from
   the stock templates.
 
+### From the VFX Lab: the TornadoFlame
+
+Lab scene `TornadoFlame` (a fire tornado built from the Spirit) → `/Game/Legaia/VFX/TornadoFlame/`. `DT_VFX` rows
+`TornadoFlame` (the Lab's 6.5 s) and `TornadoFlameArt` (the fast cut the Art plays). Built by
+`.claude/unreal-mcp/vfxport/tornado.py` (`--variant Art` for the fast cut).
+
+**In the fight.** Vahn's Tornado Flame Hyper and the end of Vahn's Craze play `TornadoFlameArt` on the **enemy**: a
+**Battle VFX** notify (track `VFX`, `EffectId` `TornadoFlameArt`, `bOnActionTarget`) on
+`AS_Vahn_Battle_TornadoFlameHyper` and `AS_Vahn_Battle_TornadoFlameMiracle`, at 0.067 s, the first hit (beat 2 of
+`DT_ArtHits`, rate 2). Both clips run ~2.7 s after the `SpecialStarter` (40 frames at scale 2), so the fast cut maps
+the Lab's time piecewise: the rise 0–1.4 s → 0–0.5 s, the full tornado 1.4–3.9 s → 0.5–1.5 s, the dissipation
+3.9–6.5 s → 1.5–2.8 s. Keys, emitter delays and stops, the cone `Open` the particles follow and the `Dissipar` start
+(1.625 s) are remapped; lifetimes and speeds stay. Its systems are `NS_TornadoFlameArt` and `NS_TornadoDissipateArt`.
+The notifies were added by editor Python (`vfxport/tornado_notify.py`); a re-import of those clips drops them.
+
+| Lab layer | Unreal | Notes |
+|---|---|---|
+| `Chao` (`SpiritGround`, plane) | `MI_TornadoFlame_Chao` (of `M_SpiritGround`) on the engine Plane, scale 5 | `Rings` 0, `RingGlow` 0 |
+| `ChaoSaia`, `Aura`, `AuraVolume`, `Miolo`, `BaseFora` (`TornadoFlameAura`, cones) | `MI_TornadoFlame_<Layer>` of `M_TornadoFlameAura` on `SM_TornadoFlame_<Layer>` | Lab OBJs, Z up, base at z = 0 |
+| 10 particle layers from 0 s | `NS_TornadoFlame` (a copy of `NS_SpiritCharge` without `Estrelas`) | GPU, same emitter names |
+| `DissiparFiapos`, `DissiparFaiscas`, `DissiparBolinhas`, `DissiparPoeira` | `NS_TornadoDissipate`, a second layer starting at 4.15 s | The MCP cannot add a copy of an emitter, so the four extra layers live in their own system |
+
+**Recipe.** `VFX_TornadoFlame`, not looping, `Duration` 6.5 (the Lab scene's length), `FadeOutTime` 0.5. Every layer
+starts at 0 except `Dissipar`. The Lab's `animate.keys` are the tracks' `Keys` (`Reveal`, `Dissolve`, `Open`, `ScaleY`,
+the ground's `Intensity`), with the Lab's ease per track (`out` = `EaseOut`, no ease = `EaseInOut`). The palette is the
+Lab's "Fogo" preset: defaults of `M_TornadoFlameAura`, the `MI_TornadoFlame_Chao` colours, and the `User.Color*` of both
+systems; the Niagara layers also carry constant colour tracks. A `Light` layer at 110 cm (`ColorMain`, keys from the
+Lab's `rimLevel`) stands in for the rim light on the Lab's dummy.
+
+**`M_TornadoFlameAura`.** Unlit, Additive, Two Sided; the Custom node is the exported `TornadoFlameAura` code (the
+Spirit aura turned around the axis: `Spin`, `Twist`, and `Dissolve`, which tears the energy and lifts it off the floor).
+Noise is `T_SpiritNoise` (the Lab generates the same texture for both). The World Position Offset Custom node is
+`M_SpiritAura`'s plus the Lab's animated cone shape, in the `VS_MESH` order: `ScaleY` stretches the height from the
+base, `Open` widens the cone (`XY × (1 + Open × (0.35 + h))`, the top most), then the bumps and waves, `Sway`, and
+`Bend` (metres) snakes the body: `XY += Bend × h × (sin(3h − 1.6t), sin(2.4h − 1.2t + 1.7))`. The cone meshes have
+bounds extensions for the open top (radius × 2 + sway + bend).
+
+**Particles that follow the cone.** The Lab's `follow: "Aura"` makes `cone` / `coneOut` particles use the radius
+of the `Aura` mesh **as animated now**: `(rb + (rt − rb) × h^flare) × (1 + Open(t) × (0.35 + h))`, plus the mesh's
+`Sway` / `Bend` shift at height `h`. `Open(t)` is the Aura's `open` keys written as a nested-ternary HLSL expression
+of `Engine.System.Age` (+ 4.15 in `NS_TornadoDissipate`), and the shift reads `Engine.Time`, the same clock as the
+material's `Time`, so the particles stay on the wall while it sways. The Lab's `swirl` turns the angle by
+`swirl × NormalizedAge` (`rise`, `cone`, `coneOut`) and adds the tangential speed to `Velocity`, so the stretched
+sparks lean along the spiral. A continuous layer's `stop` closes the spawn window
+(`Emitter.Age >= delay && Emitter.Age <= stop`).
+
+**`M_SpiritGround`** was behind the Lab: the effect gained `RingGlow` (the inner ring's brightness). It was added
+with default 1, so the Spirit charge looks the same.
+
 ---
 
 ## Authoring effects with Claude
