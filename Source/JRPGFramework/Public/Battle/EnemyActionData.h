@@ -100,6 +100,14 @@ struct JRPGFRAMEWORK_API FJRPGEnemyActionData : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Enemy Action")
 	int32 EndStep = 0;
 
+	/**
+	 * Nas reações (flinch, knockdown): onde o original põe o brilho do golpe, o registro de efeito de código 0 / 9 da trilha
+	 * +0x14 da entrada. Três números, em unidades do PS1 no espaço do ator: de lado, para cima (a partir do chão) e para a
+	 * frente; o original multiplica pela escala da malha. Vazio = a entrada não tem.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Enemy Action")
+	TArray<int32> ImpactOffset;
+
 	/** Um golpe que a IA do original sorteia: tag 0x0C..0x1F com um custo de AGL de verdade. */
 	bool IsSwing() const { return Tag >= 0x0C && Tag <= 0x1F && AGLCost != 0xFF; }
 };

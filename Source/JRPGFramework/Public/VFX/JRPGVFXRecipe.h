@@ -47,6 +47,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recipe", meta = (ClampMin = "0.0"))
 	float MinPlayTime = 0.0f;
 
+	/**
+	 * O instante que marca a receita, em segundos (o flash da absorção, quando a aura acende). Quem toca pode ajustar o
+	 * FJRPGVFXContext::TimeScale para ele cair num momento do jogo: TimeScale = CueTime / segundos até lá. 0 = nenhum.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recipe", meta = (ClampMin = "0.0"))
+	float CueTime = 0.0f;
+
 	/** O parâmetro escalar que os materiais das camadas Mesh recebem durante o FadeOutTime (1 = inteiro, 0 = sumiu). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recipe")
 	FName FadeParameter = TEXT("JRPGVFXFade");

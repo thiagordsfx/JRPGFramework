@@ -194,6 +194,19 @@ struct JRPGFRAMEWORK_API FJRPGHeroReactionData : public FTableRowBase
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hero Reaction|Motion")
 	int32 DyingEndStep = 0;
+
+	/**
+	 * Onde o original põe o brilho do golpe em cada reação (o registro de efeito de código 0 / 9 da entrada; ver
+	 * FJRPGEnemyActionData::ImpactOffset): de lado, para cima a partir do chão e para a frente, em unidades do PS1. Vazio = não tem.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hero Reaction|Impact")
+	TArray<int32> FlinchHighImpact;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hero Reaction|Impact")
+	TArray<int32> FlinchLowImpact;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hero Reaction|Impact")
+	TArray<int32> KnockdownImpact;
 };
 
 /**

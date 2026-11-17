@@ -6,6 +6,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "VFX/JRPGVFXRecipe.h"
+#include "VFX/JRPGVFXSubsystem.h"
 #include "VFX/JRPGVFXTypes.h"
 #include "UObject/Package.h"
 
@@ -29,6 +30,20 @@ bool FJRPGVFXTracksTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Escalar linear no meio"), Scalar.Evaluate(0.5f), 4.0f, 1e-4f);
 	Scalar.Ease = EJRPGVFXEase::Pulse;
 	TestEqual(TEXT("Escalar em Pulse volta ao From"), Scalar.Evaluate(1.0f), 2.0f, 1e-3f);
+
+	// Chaves em segundos: sobe, segura, desce; parado antes da primeira e depois da última
+	FJRPGVFXScalarTrack Keyed;
+	Keyed.From = 9.0f;   // ignorado com chaves
+	Keyed.To = 9.0f;
+	Keyed.Ease = EJRPGVFXEase::Linear;
+	Keyed.Keys = { { 0.5f, 0.0f }, { 1.5f, 1.0f }, { 3.0f, 1.0f }, { 4.0f, 0.0f } };
+	TestEqual(TEXT("Chaves: antes da primeira"), Keyed.EvaluateAt(0.9f, 0.1f), 0.0f, 1e-4f);
+	TestEqual(TEXT("Chaves: no meio da subida"), Keyed.EvaluateAt(0.0f, 1.0f), 0.5f, 1e-4f);
+	TestEqual(TEXT("Chaves: segurando"), Keyed.EvaluateAt(0.0f, 2.0f), 1.0f, 1e-4f);
+	TestEqual(TEXT("Chaves: no meio da descida"), Keyed.EvaluateAt(0.0f, 3.5f), 0.5f, 1e-4f);
+	TestEqual(TEXT("Chaves: depois da última"), Keyed.EvaluateAt(0.0f, 60.0f), 0.0f, 1e-4f);
+	Keyed.Ease = EJRPGVFXEase::EaseIn;
+	TestEqual(TEXT("Chaves: o Ease vale em cada par"), Keyed.EvaluateAt(0.0f, 1.0f), 0.25f, 1e-4f);
 
 	FJRPGVFXColorTrack Color;
 	Color.From = FLinearColor::Black;
@@ -59,6 +74,44 @@ bool FJRPGVFXRecipeLengthTest::RunTest(const FString& Parameters)
 
 	Recipe->Duration = 3.0f;
 	TestEqual(TEXT("Duration explícito vence"), Recipe->GetLength(), 3.0f, 1e-4f);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJRPGVFXFloatParamTest, "JRPG.VFX.FloatParam", JRPG_VFX_TEST_FLAGS)
+bool FJRPGVFXFloatParamTest::RunTest(const FString& Parameters)
+{
+	// SetEffectFloat: espera o Delay e vai de From a To em BlendTime
+	FJRPGVFXFloatParam Blend;
+	Blend.From = 1.0f;
+	Blend.To = 3.0f;
+	Blend.Delay = 0.5f;
+	Blend.BlendTime = 1.0f;
+	Blend.Elapsed = 0.2f;
+	TestEqual(TEXT("Blend: antes do Delay"), Blend.Evaluate(), 1.0f, 1e-4f);
+	Blend.Elapsed = 1.0f;
+	TestEqual(TEXT("Blend: no meio"), Blend.Evaluate(), 2.0f, 1e-4f);
+	Blend.Elapsed = 9.0f;
+	TestEqual(TEXT("Blend: no fim"), Blend.Evaluate(), 3.0f, 1e-4f);
+
+	// PulseEffectFloat: sobe ao Peak, volta ao Rest e fica
+	FJRPGVFXFloatParam Pulse;
+	Pulse.From = 0.0f;
+	Pulse.To = 1.3f;
+	Pulse.BlendTime = 0.2f;
+	Pulse.bPulse = true;
+	Pulse.FallTime = 0.4f;
+	Pulse.Rest = 1.0f;
+	Pulse.Elapsed = 0.0f;
+	TestEqual(TEXT("Pulso: começa no From"), Pulse.Evaluate(), 0.0f, 1e-4f);
+	Pulse.Elapsed = 0.2f;
+	TestEqual(TEXT("Pulso: no pico"), Pulse.Evaluate(), 1.3f, 1e-4f);
+	Pulse.Elapsed = 0.4f;
+	TestEqual(TEXT("Pulso: no meio da volta"), Pulse.Evaluate(), 1.15f, 1e-4f);
+	Pulse.Elapsed = 5.0f;
+	TestEqual(TEXT("Pulso: fica no Rest"), Pulse.Evaluate(), 1.0f, 1e-4f);
+	Pulse.BlendTime = 0.0f;
+	Pulse.Elapsed = 0.0f;
+	TestEqual(TEXT("Pulso sem subida: começa no pico"), Pulse.Evaluate(), 1.3f, 1e-4f);
 	return true;
 }
 

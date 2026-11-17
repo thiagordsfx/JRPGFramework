@@ -548,6 +548,37 @@ public:
 	TObjectPtr<USoundBase> MissSound;
 
 	/**
+	 * O efeito de impacto de todo golpe deste pawn que conecta (Damage): a linha do DT_VFX tocada no alvo. No Block e no Miss
+	 * não há efeito, como o som do impacto. Um golpe cujo som de impacto tem uma linha própria no DT_VFX, "Hit_<nome do asset
+	 * do som>" (ex.: "Hit_SW_Battle_Cue04" apontando a receita do corte), toca essa no lugar: é o som que diz se o golpe é de
+	 * lâmina. Vazio = nenhum efeito.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Battle Pawn|VFX")
+	FName HitVFXId = TEXT("HitPunch");
+
+	/**
+	 * Quantos quadros lógicos o efeito de impacto espera pelo som do golpe (para saber se é o de corte) quando a lógica resolve
+	 * o golpe antes do notify do som chegar. Passou disso, sai o HitVFXId.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Battle Pawn|VFX", meta = (ClampMin = "0"))
+	int32 HitVFXWaitFrames = 2;
+
+	/**
+	 * Onde o efeito de impacto nasce no corpo do ALVO quando ele não traz o ponto do disco (ImpactOffset do DT_EnemyActions,
+	 * <Reação>Impact do DT_HeroReactions: o lugar do brilho do golpe do original, por monstro): a altura, em fração da altura
+	 * dele (0 = os pés, 1 = o topo). O ponto vai no FJRPGVFXContext::Location: as receitas de impacto apoiam as camadas em Location.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Battle Pawn|VFX", meta = (ClampMin = "0.0", ClampMax = "1.5"))
+	float HitVFXHeight = 0.65f;
+
+	/**
+	 * Um ajuste do efeito de impacto na direção de quem bate (negativo = para trás), em fração do raio do corpo do alvo, somado
+	 * ao ponto do disco. 0 = exatamente o ponto do original.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Battle Pawn|VFX")
+	float HitVFXForward = 0.0f;
+
+	/**
 	 * Quantos quadros lógicos o idle espera pelo fim real do último clip da ação quando a ação (os dados) acaba antes dele. O
 	 * original nunca corta o último clip (o estado 0x20 espera ele voltar ao idle); o teto só protege de um clip errado e longo.
 	 */
@@ -657,27 +688,47 @@ private:
 	FJRPGVFXHandle SpiritVFX;
 
 	/**
-	 * A aura da Art: a cada ArtStarter / SpecialStarter o herói absorve energia (DT_VFX "ArtAbsorb_<Key>", uma vez) e, no
-	 * primeiro starter da ação, acende a aura de chama no corpo ("ArtAura_<Key>", em loop) até a ação acabar. Cada starter
-	 * seguinte (as Supers) sobe o AuraPower da aura em ArtAuraPowerStep, depois da absorção.
+	 * A aura da Art: cumulativa, do primeiro starter até o fim da ação. Linhas do DT_VFX por herói (<Key> = Vahn, Noa, Gala):
+	 *   "ArtAura_<Key>"      — a aura em loop (a chama de pós-processo e as faíscas). O tamanho vem de ArtAuraSizes /
+	 *                          ArtAuraHeights pelo nível (SetEffectFloat Size / Height); "SparkRate" liga as faíscas.
+	 *   "ArtAbsorb_<Key>"    — o chão e a absorção de um SpecialStarter, esticados (TimeScale) para o CueTime cair no flash.
+	 *   "ArtFlash_<Key>"     — o estouro de partículas e a luz do flash.
+	 *   "ArtDissipate_<Key>" — as partículas que se soltam quando a aura some.
+	 * ArtStarter: sem aura, acende a do nível 0 (a pequena); com aura, nada muda. SpecialStarter: toca a absorção com a aura que
+	 * já houver (sem aura, abre uma só com a linha da borda carregando) e, no quadro do notify Art Aura Flash do clip
+	 * (UJRPGAnimNotify_AuraFlash; sem ele, no fim do passo), pisca e sobe um nível. Fim da ação: pisca, dissolve e some.
 	 */
-	void StartArtAuraVFX();
+	void StartArtAuraVFX(const FJRPGActionStep& Step);
+	/** O flash de um SpecialStarter: o estouro e a aura um nível acima. */
+	void FlashArtAura();
+	/** Fim da ação. bImmediate: some na hora, sem a piscada nem as partículas (EndPlay). */
 	void StopArtAuraVFX(bool bImmediate);
+	/** O quadro lógico do flash, em segundos de clip convertidos com o Loop Window (UBattleSubsystem faz igual com os golpes). */
+	int32 ArtFlashFrameFor(const FJRPGActionStep& Step) const;
 	FJRPGVFXHandle ArtAuraVFX;
-	float ArtAuraPower = 0.0f;
+	/** O nível da aura (índice em ArtAuraSizes); INDEX_NONE = ainda sem chama (só a linha de um SpecialStarter carregando). */
+	int32 ArtAuraLevel = INDEX_NONE;
+	/** O quadro lógico do flash pendente; INDEX_NONE = nenhum. */
+	int32 ArtFlashFrame = INDEX_NONE;
 
 public:
-	/** Quanto a absorção do starter dura antes de a aura acender ou crescer, em segundos (o Delay do AuraPower). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Battle Pawn|VFX", meta = (ClampMin = "0.0"))
-	float ArtAuraAbsorbSeconds = 0.55f;
+	/** O Size do M_AnimeAura por nível: 0 = o starter comum, 1 = o primeiro flash, 2 = o segundo flash em diante (para no último). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Battle Pawn|VFX")
+	TArray<float> ArtAuraSizes = { 0.015f, 0.043f, 0.055f };
 
-	/** Quanto cada starter depois do primeiro soma ao AuraPower da aura (começa em 1). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Battle Pawn|VFX", meta = (ClampMin = "0.0"))
-	float ArtAuraPowerStep = 0.35f;
+	/** O Height do M_AnimeAura por nível (mesmos índices de ArtAuraSizes). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Battle Pawn|VFX")
+	TArray<float> ArtAuraHeights = { 3.0f, 3.0f, 3.4f };
 
-	/** O teto do AuraPower. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Battle Pawn|VFX", meta = (ClampMin = "1.0"))
-	float ArtAuraPowerMax = 2.0f;
+	/** O som da absorção: toca no começo de todo SpecialStarter, junto do ArtAbsorb_<Key>. Vazio = nenhum. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Battle Pawn|VFX")
+	TSoftObjectPtr<USoundBase> ArtAbsorbSound = TSoftObjectPtr<USoundBase>(
+		FSoftObjectPath(TEXT("/Game/Legaia/Battle/Sounds/Common/SW_Battle_StarterAbsorb.SW_Battle_StarterAbsorb")));
+
+	/** O som do flash de um SpecialStarter (a aura subindo de nível); a piscada do fim da ação não o toca. Vazio = nenhum. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Battle Pawn|VFX")
+	TSoftObjectPtr<USoundBase> ArtFlashSound = TSoftObjectPtr<USoundBase>(
+		FSoftObjectPath(TEXT("/Game/Legaia/Battle/Sounds/Common/SW_Battle_StarterFlash.SW_Battle_StarterFlash")));
 
 private:
 
@@ -795,6 +846,20 @@ private:
 	 */
 	int32 FindHitForSound(const FJRPGBattleSoundSpec& Spec) const;
 	void UpdateHeldSounds(int32 LogicFrame);
+
+	/** Toca no alvo o efeito de impacto próprio do som ("Hit_<asset>" no DT_VFX). Falso se o som não tem linha. */
+	bool PlayHitVFXForSound(const USoundBase* Sound, AJRPGBattlePawn* Victim, bool bLowHit);
+	/** Toca no alvo o efeito de impacto padrão (HitVFXId). */
+	void PlayDefaultHitVFX(AJRPGBattlePawn* Victim, bool bLowHit);
+	/** O ponto do golpe no corpo do alvo: o do disco (GetImpactOffset do alvo), senão a altura HitVFXHeight; do lado de quem bate. */
+	FVector HitVFXLocation(const AJRPGBattlePawn& Victim, bool bLowHit) const;
+	/**
+	 * O ponto do brilho do golpe deste pawn, do disco: o da reação que o golpe causa (o flinch de golpe alto, ou o de golpe baixo
+	 * com bLowHit; na falta dele o outro, e por fim o do knockdown) no DT_EnemyActions / DT_HeroReactions. Em cm no espaço do
+	 * registro (X o "z" do disco, que fica atrás do alvo; Y de lado; Z para cima a partir da raiz do modelo), já na escala da
+	 * malha. Falso se não há.
+	 */
+	bool GetImpactOffset(bool bLowHit, FVector& OutOffset) const;
 
 	/** Desliza até To em Frames quadros lógicos, a partir do quadro dado (o recuo do defensor, o acompanhar do atacante). */
 	void StartSlide(const FVector& To, int32 LogicFrame, int32 Frames);
@@ -976,6 +1041,15 @@ private:
 
 	/** O resultado de cada golpe desta ação já resolvido (HitIndex -> Damage / Block / Miss), e os sons que esperam por ele. */
 	TMap<int32, EJRPGBattleEventType> HitResults;
+
+	/** Um golpe que conectou e ainda espera o som dele para escolher o efeito de impacto (até Deadline, em quadros lógicos). */
+	struct FPendingHitVFX
+	{
+		int32 Deadline = 0;
+		TWeakObjectPtr<AJRPGBattlePawn> Victim;
+		bool bLowHit = false;
+	};
+	TMap<int32, FPendingHitVFX> PendingHitVFX;
 
 	/**
 	 * O contexto de som da ação (o passo, os quadros dos golpes e os HitResults) vale: do BeginAction até a cauda da ação que acabou

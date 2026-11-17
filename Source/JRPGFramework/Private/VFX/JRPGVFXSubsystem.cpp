@@ -4,6 +4,8 @@
 #include "Core/CoreSubsystem.h"
 #include "Components/MeshComponent.h"
 #include "Components/PointLightComponent.h"
+#include "Components/PostProcessComponent.h"
+#include "Components/PrimitiveComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/DataTable.h"
@@ -14,6 +16,7 @@
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "NiagaraComponent.h"
 #include "NiagaraFunctionLibrary.h"
@@ -34,6 +37,7 @@ namespace
 	const FName NiagaraEffectScale(TEXT("EffectScale"));
 	const FName NiagaraTargetPosition(TEXT("TargetPosition"));
 	const FName NiagaraInstigatorPosition(TEXT("InstigatorPosition"));
+	const FName NiagaraBodyHeightScale(TEXT("BodyHeightScale"));
 
 	bool LayerIsSpatial(EJRPGVFXLayerType Type)
 	{
@@ -116,6 +120,8 @@ void UJRPGVFXSubsystem::Deinitialize()
 	Instances.Reset();
 	FreeMeshes.Reset();
 	FreeLights.Reset();
+	FreePostProcesses.Reset();
+	CustomDepthUsers.Reset();
 	Host = nullptr;
 	Super::Deinitialize();
 }
@@ -288,6 +294,27 @@ void UJRPGVFXSubsystem::SetEffectFloat(FJRPGVFXHandle Handle, FName Name, float 
 	Instance->FloatParams.Add(Name, Param);
 }
 
+void UJRPGVFXSubsystem::PulseEffectFloat(FJRPGVFXHandle Handle, FName Name, float Peak, float RiseTime, float FallTime, float Rest, float Delay)
+{
+	FJRPGVFXInstance* Instance = Handle.IsValid() && !Name.IsNone()
+		? Instances.FindByPredicate([&](const FJRPGVFXInstance& Each) { return Each.Id == Handle.Id; })
+		: nullptr;
+	if (!Instance)
+	{
+		return;
+	}
+	const FJRPGVFXFloatParam* Existing = Instance->FloatParams.Find(Name);
+	FJRPGVFXFloatParam Param;
+	Param.From = Existing ? Existing->Evaluate() : Rest;
+	Param.To = Peak;
+	Param.Delay = FMath::Max(Delay, 0.0f);
+	Param.BlendTime = FMath::Max(RiseTime, 0.0f);
+	Param.bPulse = true;
+	Param.FallTime = FMath::Max(FallTime, 0.0f);
+	Param.Rest = Rest;
+	Instance->FloatParams.Add(Name, Param);
+}
+
 float UJRPGVFXSubsystem::GetEffectFloat(FJRPGVFXHandle Handle, FName Name, float Fallback) const
 {
 	const FJRPGVFXInstance* Instance = Handle.IsValid()
@@ -326,7 +353,8 @@ void UJRPGVFXSubsystem::Tick(float DeltaTime)
 			continue;
 		}
 
-		Instance.Elapsed += DeltaTime;
+		// A linha de tempo da receita anda no TimeScale do disparo; o fade e o SetEffectFloat, no relógio real
+		Instance.Elapsed += DeltaTime * FMath::Max(Instance.Context.TimeScale, 0.01f);
 		for (TPair<FName, FJRPGVFXFloatParam>& Param : Instance.FloatParams)
 		{
 			Param.Value.Elapsed += DeltaTime;
@@ -424,6 +452,59 @@ FVector UJRPGVFXSubsystem::ActorCenter(const AActor* Actor, const FVector& Fallb
 	return Extent.IsNearlyZero() ? Actor->GetActorLocation() : Origin;
 }
 
+bool UJRPGVFXSubsystem::BodyCenter(const AActor* Actor, FVector& OutCenter)
+{
+	if (!IsValid(Actor))
+	{
+		return false;
+	}
+	// A malha que manda na pose: não segue outra (as peças de arma seguem o corpo por Leader Pose) e tem mais ossos
+	const USkeletalMeshComponent* Body = nullptr;
+	TInlineComponentArray<USkeletalMeshComponent*> Meshes(Actor);
+	for (const USkeletalMeshComponent* Each : Meshes)
+	{
+		if (Each && Each->IsRegistered() && !Each->LeaderPoseComponent.IsValid()
+			&& (!Body || Each->GetNumBones() > Body->GetNumBones()))
+		{
+			Body = Each;
+		}
+	}
+	if (!Body)
+	{
+		return false;
+	}
+	const int32 NumBones = Body->GetNumBones();
+	const TArray<FTransform>& Pose = Body->GetComponentSpaceTransforms();
+	if (NumBones < 2 || Pose.Num() < NumBones)
+	{
+		return false;
+	}
+	// Sem o root (o osso 0 fica nos pés / na origem): as peças do corpo
+	FVector Sum = FVector::ZeroVector;
+	for (int32 Bone = 1; Bone < NumBones; ++Bone)
+	{
+		Sum += Pose[Bone].GetLocation();
+	}
+	OutCenter = Body->GetComponentTransform().TransformPosition(Sum / static_cast<double>(NumBones - 1));
+	return true;
+}
+
+void UJRPGVFXSubsystem::FollowBody(const FJRPGVFXLayerState& State, UNiagaraComponent* Niagara)
+{
+	USceneComponent* Component = State.Component.Get();
+	FVector Center;
+	if (!Component || !BodyCenter(State.FollowActor.Get(), Center))
+	{
+		return;
+	}
+	const FVector Here = Component->GetComponentLocation();
+	Component->SetWorldLocation(FVector(Center.X + State.FollowOffset.X, Center.Y + State.FollowOffset.Y, Here.Z));
+	if (Niagara && State.FollowHeight > 1.0f)
+	{
+		Niagara->SetVariableFloat(NiagaraBodyHeightScale, FMath::Clamp((Center.Z - Here.Z) / State.FollowHeight, 0.2f, 2.0f));
+	}
+}
+
 UJRPGVFXSubsystem::FAnchorPoint UJRPGVFXSubsystem::ResolveAnchor(const FJRPGVFXLayer& Layer, const FJRPGVFXContext& Context)
 {
 	FAnchorPoint Point;
@@ -511,6 +592,16 @@ void UJRPGVFXSubsystem::StartLayer(FJRPGVFXInstance& Instance, int32 LayerIndex)
 		}
 		World = Local * FTransform(Point.Rotation, Point.Location);
 		State.BaseScale = World.GetScale3D();
+
+		// Seguir o corpo: nasce já sobre ele (só o Offset da camada afasta) e guarda a altura do centro para o BodyHeightScale
+		FVector Center;
+		if (Layer.bFollowBody && BodyCenter(Point.Actor, Center))
+		{
+			State.FollowActor = Point.Actor;
+			State.FollowOffset = FVector2D(World.GetLocation() - Point.Location);
+			State.FollowHeight = Center.Z - World.GetLocation().Z;
+			World.SetLocation(FVector(Center.X + State.FollowOffset.X, Center.Y + State.FollowOffset.Y, World.GetLocation().Z));
+		}
 	}
 
 	switch (Layer.Type)
@@ -534,6 +625,9 @@ void UJRPGVFXSubsystem::StartLayer(FJRPGVFXInstance& Instance, int32 LayerIndex)
 			return;
 		}
 		Niagara->SetWorldScale3D(World.GetScale3D());
+		// A camada que termina acompanha a linha de tempo esticada; a que fica em loop simula a 1. Sempre escrito: o componente
+		// vem do pool com a dilatação do disparo anterior
+		Niagara->SetCustomTimeDilation(LayerLoops(Recipe, Layer) ? 1.0f : FMath::Max(Instance.Context.TimeScale, 0.01f));
 		// Branco = sem tinta: o sistema fica com a cor dele (o User.Color HDR de cada herói no Spirit)
 		if (!Instance.Context.Color.Equals(FLinearColor::White))
 		{
@@ -602,6 +696,30 @@ void UJRPGVFXSubsystem::StartLayer(FJRPGVFXInstance& Instance, int32 LayerIndex)
 		UpdateLayer(Instance, LayerIndex, LayerAlpha(Recipe, Layer, Instance.Elapsed), 1.0f);
 		return;
 	}
+	case EJRPGVFXLayerType::PostProcess:
+	{
+		UPostProcessComponent* Post = Layer.Material ? AcquirePostProcess() : nullptr;
+		UMaterialInstanceDynamic* Material = Post ? UMaterialInstanceDynamic::Create(Layer.Material, Post) : nullptr;
+		if (!Material)
+		{
+			if (Post)
+			{
+				ReleasePostProcess(Post);
+			}
+			State.bDone = true;
+			return;
+		}
+		Material->SetScalarParameterValue(Recipe.FadeParameter, 1.0f);
+		// O material lê a silhueta do ator pela Custom Depth: sem ator âncora ele roda, mas não acha corpo nenhum
+		AcquireCustomDepth(AnchorActor(Layer, Instance.Context), State);
+		State.Component = Post;
+		State.PostMaterial = Material;
+		UpdateLayer(Instance, LayerIndex, LayerAlpha(Recipe, Layer, Instance.Elapsed), 1.0f);
+		Post->Settings.WeightedBlendables.Array.Reset();
+		Post->Settings.WeightedBlendables.Array.Add(FWeightedBlendable(1.0f, Material));
+		Post->bEnabled = true;
+		return;
+	}
 	case EJRPGVFXLayerType::CameraShake:
 	{
 		// Um disparo só. Sem GameInstance (preview de animação) não há câmera de jogo para tremer
@@ -631,10 +749,17 @@ void UJRPGVFXSubsystem::UpdateLayer(FJRPGVFXInstance& Instance, int32 LayerIndex
 	UMeshComponent* Mesh = Layer.Type == EJRPGVFXLayerType::Mesh ? Cast<UMeshComponent>(Component) : nullptr;
 	UPointLightComponent* Light = Layer.Type == EJRPGVFXLayerType::Light ? Cast<UPointLightComponent>(Component) : nullptr;
 	AActor* Body = Layer.Type == EJRPGVFXLayerType::BodyParam ? State.BodyActor.Get() : nullptr;
-	if (!Niagara && !Mesh && !Light && !Body)
+	UMaterialInstanceDynamic* Post = Layer.Type == EJRPGVFXLayerType::PostProcess ? State.PostMaterial.Get() : nullptr;
+	if (!Niagara && !Mesh && !Light && !Body && !Post)
 	{
 		return;
 	}
+	if (State.FollowActor.IsValid())
+	{
+		FollowBody(State, Niagara);
+	}
+	// As faixas com chaves leem o relógio da camada, sem repetir numa receita em loop
+	const float Seconds = FMath::Max(Instance.Elapsed - Layer.StartTime, 0.0f);
 
 	float ScaleMul = 1.0f;
 	float IntensityMul = 1.0f;
@@ -647,7 +772,7 @@ void UJRPGVFXSubsystem::UpdateLayer(FJRPGVFXInstance& Instance, int32 LayerIndex
 		{
 			continue;
 		}
-		const float Value = Track.Evaluate(Alpha);
+		const float Value = Track.EvaluateAt(Alpha, Seconds);
 		if (Track.Name == TrackScale)
 		{
 			ScaleMul = Value;
@@ -665,6 +790,10 @@ void UJRPGVFXSubsystem::UpdateLayer(FJRPGVFXInstance& Instance, int32 LayerIndex
 		else if (Mesh)
 		{
 			Mesh->SetScalarParameterValueOnMaterials(Track.Name, Value);
+		}
+		else if (Post)
+		{
+			Post->SetScalarParameterValue(Track.Name, Value);
 		}
 		else if (Body)
 		{
@@ -692,6 +821,10 @@ void UJRPGVFXSubsystem::UpdateLayer(FJRPGVFXInstance& Instance, int32 LayerIndex
 		{
 			Mesh->SetColorParameterValueOnMaterials(Track.Name, Value);
 		}
+		else if (Post)
+		{
+			Post->SetVectorParameterValue(Track.Name, Value);
+		}
 		else if (Body)
 		{
 			const FLinearColor Rest = Track.Evaluate(0.0f, Instance.Context.Color);
@@ -710,6 +843,10 @@ void UJRPGVFXSubsystem::UpdateLayer(FJRPGVFXInstance& Instance, int32 LayerIndex
 		{
 			Mesh->SetScalarParameterValueOnMaterials(Param.Key, Param.Value.Evaluate());
 		}
+		else if (Post)
+		{
+			Post->SetScalarParameterValue(Param.Key, Param.Value.Evaluate());
+		}
 	}
 
 	if (Component && bHasScale)
@@ -724,6 +861,10 @@ void UJRPGVFXSubsystem::UpdateLayer(FJRPGVFXInstance& Instance, int32 LayerIndex
 	if (Mesh && Fade < 1.0f)
 	{
 		Mesh->SetScalarParameterValueOnMaterials(Recipe.FadeParameter, ClampedFade);
+	}
+	if (Post && Fade < 1.0f)
+	{
+		Post->SetScalarParameterValue(Recipe.FadeParameter, ClampedFade);
 	}
 	if (Niagara)
 	{
@@ -758,6 +899,8 @@ void UJRPGVFXSubsystem::ReleaseComponent(FJRPGVFXLayerState& State, bool bImmedi
 {
 	USceneComponent* Component = State.Component.Get();
 	State.Component.Reset();
+	State.PostMaterial.Reset();
+	ReleaseCustomDepth(State);
 	if (!Component)
 	{
 		return;
@@ -782,6 +925,10 @@ void UJRPGVFXSubsystem::ReleaseComponent(FJRPGVFXLayerState& State, bool bImmedi
 	else if (UPointLightComponent* Light = Cast<UPointLightComponent>(Component))
 	{
 		ReleaseLight(Light);
+	}
+	else if (UPostProcessComponent* Post = Cast<UPostProcessComponent>(Component))
+	{
+		ReleasePostProcess(Post);
 	}
 }
 
@@ -843,6 +990,7 @@ AActor* UJRPGVFXSubsystem::EnsureHost()
 	// Os componentes do hospedeiro antigo (mundo trocado) foram com ele
 	FreeMeshes.Reset();
 	FreeLights.Reset();
+	FreePostProcesses.Reset();
 	return Host;
 }
 
@@ -930,4 +1078,90 @@ void UJRPGVFXSubsystem::ReleaseLight(UPointLightComponent* Component)
 	Component->SetIntensity(0.0f);
 	Component->AttachToComponent(Host->GetRootComponent(), FAttachmentTransformRules::SnapToTargetIncludingScale);
 	FreeLights.Add(Component);
+}
+
+UPostProcessComponent* UJRPGVFXSubsystem::AcquirePostProcess()
+{
+	while (FreePostProcesses.Num() > 0)
+	{
+		if (UPostProcessComponent* Pooled = FreePostProcesses.Pop(EAllowShrinking::No))
+		{
+			if (IsValid(Pooled))
+			{
+				return Pooled;
+			}
+		}
+	}
+	AActor* Owner = EnsureHost();
+	if (!Owner)
+	{
+		return nullptr;
+	}
+	UPostProcessComponent* Post = NewObject<UPostProcessComponent>(Owner, NAME_None, RF_Transient);
+	// Sem volume: vale para qualquer câmera do mundo, somado aos pós-processos que já existem (é um blendable)
+	Post->bUnbound = true;
+	Post->bEnabled = false;
+	Post->BlendWeight = 1.0f;
+	Post->SetupAttachment(Owner->GetRootComponent());
+	Post->RegisterComponent();
+	return Post;
+}
+
+void UJRPGVFXSubsystem::ReleasePostProcess(UPostProcessComponent* Component)
+{
+	if (!IsValid(Component) || !IsValid(Host))
+	{
+		return;
+	}
+	// Desligado a engine nem roda o material; o blendable (e o MID dele) é solto até o próximo uso
+	Component->bEnabled = false;
+	Component->Settings.WeightedBlendables.Array.Reset();
+	FreePostProcesses.Add(Component);
+}
+
+void UJRPGVFXSubsystem::AcquireCustomDepth(AActor* Actor, FJRPGVFXLayerState& State)
+{
+	if (!IsValid(Actor))
+	{
+		return;
+	}
+	// Todas as malhas do ator: o corpo e as peças que seguem a pose dele
+	TInlineComponentArray<UMeshComponent*> Meshes(Actor);
+	for (UMeshComponent* Mesh : Meshes)
+	{
+		const TWeakObjectPtr<UPrimitiveComponent> Key(Mesh);
+		int32* Users = CustomDepthUsers.Find(Key);
+		if (!Users)
+		{
+			if (Mesh->bRenderCustomDepth)
+			{
+				continue;   // já estava ligado por outro motivo: não é nosso para desligar
+			}
+			Mesh->SetRenderCustomDepth(true);
+			Users = &CustomDepthUsers.Add(Key, 0);
+		}
+		++(*Users);
+		State.CustomDepthMeshes.Add(Key);
+	}
+}
+
+void UJRPGVFXSubsystem::ReleaseCustomDepth(FJRPGVFXLayerState& State)
+{
+	for (const TWeakObjectPtr<UPrimitiveComponent>& Entry : State.CustomDepthMeshes)
+	{
+		int32* Users = CustomDepthUsers.Find(Entry);
+		if (!Users)
+		{
+			continue;
+		}
+		if (--(*Users) <= 0)
+		{
+			if (UPrimitiveComponent* Mesh = Entry.Get())
+			{
+				Mesh->SetRenderCustomDepth(false);
+			}
+			CustomDepthUsers.Remove(Entry);
+		}
+	}
+	State.CustomDepthMeshes.Reset();
 }

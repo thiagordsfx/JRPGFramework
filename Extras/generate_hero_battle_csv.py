@@ -63,6 +63,7 @@ import sys
 import tempfile
 
 import legaia_toml as lt
+import monster_block as mb
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -94,6 +95,8 @@ REACTION_ENTRIES = (("FlinchHighFrames", 2), ("FlinchLowFrames", 3), ("BlockFram
 # O movimento de cada reação: a velocidade de raiz (+0x0C, unidades por vsync ao longo da direção; negativa = recua durante o
 # clip inteiro) e o passo do fim do clip (+0x0E, o quanto o clip deixa o corpo de onde começou). A entrada 8 (o caído) é 0 em todo
 # arquivo e fica de fora
+# As reações que trazem o brilho do golpe (o registro de efeito 0 / 9 da entrada): a coluna <Nome>Impact
+REACTION_IMPACT = (("FlinchHigh", 2), ("FlinchLow", 3), ("Knockdown", 4))
 REACTION_MOTION = (("FlinchHigh", 2), ("FlinchLow", 3), ("Block", 0x0B), ("Knockdown", 4), ("GetUp", 5), ("Dying", 7))
 
 ART_HITS_TABLE = "DT_ArtHits"
@@ -263,6 +266,8 @@ def reaction_lengths(lzs_tool, extracted, character, workdir):
         offset = offsets[tag]
         lengths[name + "RootSpeed"] = struct.unpack_from("<h", data, offset + 0x0C)[0]
         lengths[name + "EndStep"] = struct.unpack_from("<h", data, offset + 0x0E)[0]
+    for name, tag in REACTION_IMPACT:
+        lengths[name + "Impact"] = lt.ue_array(mb.impact_offset(data[offsets[tag]:offsets[tag] + 0x54]))
     return lengths
 
 
@@ -376,7 +381,8 @@ def main():
             row.update(lengths)
             reaction_rows.append(row)
     reaction_columns = (["Character"] + [column for column, _tag in REACTION_ENTRIES]
-                        + [name + suffix for name, _tag in REACTION_MOTION for suffix in ("RootSpeed", "EndStep")])
+                        + [name + suffix for name, _tag in REACTION_MOTION for suffix in ("RootSpeed", "EndStep")]
+                        + [name + "Impact" for name, _tag in REACTION_IMPACT])
 
     # --- DT_ArtHits ---------------------------------------------------------------------------------
     arts, arts_order = lt.read_rows("DT_Arts")
@@ -395,7 +401,7 @@ def main():
 
     print("[hero-battle] DT_HeroReactions: %d heróis" % len(reaction_rows))
     for r in reaction_rows:
-        print("            %-8s %s" % (r["---"], "  ".join("%s %d" % (c[:-6], r[c]) for c in reaction_columns[1:])))
+        print("            %-8s %s" % (r["---"], "  ".join("%s %s" % (c[:-6], r[c]) for c in reaction_columns[1:])))
     print("[hero-battle] DT_HeroSwings: %d linhas (%d padrão)" % (len(swing_rows), sum(1 for r in swing_rows if r["_default"])))
     for r in swing_rows:
         print("            %-34s poder %-9s quadros %-9s rate %d custo %d" % (

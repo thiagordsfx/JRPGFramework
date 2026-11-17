@@ -2,9 +2,12 @@
 #include "Components/AudioComponent.h"
 #include "Arts/JRPGArtSequence.h"
 #include "Battle/BattleFormulas.h"
+#include "Battle/JRPGAnimNotify_AuraFlash.h"
+#include "Battle/JRPGAnimNotify_LoopWindow.h"
 #include "Battle/JRPGBattleArena.h"
 #include "Core/CoreSubsystem.h"
 #include "Field/JRPGFieldEnemyAnimInstance.h"
+#include "VFX/JRPGVFXRecipe.h"
 #include "VFX/JRPGVFXSubsystem.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -187,6 +190,7 @@ void AJRPGBattlePawn::InitCombatant(const FJRPGCombatant& InCombatant, const FJR
 	bDeathFading = false;
 	HitResults.Reset();
 	HeldSounds.Reset();
+	PendingHitVFX.Reset();
 	bSoundContextActive = false;
 	SoundContextEndFrame = INDEX_NONE;
 	// A pose do idle é medida de novo (o modelo pode ser outro)
@@ -1860,7 +1864,7 @@ void AJRPGBattlePawn::UpdatePlayback(int32 LogicFrame)
 			}
 			else
 			{
-				StartArtAuraVFX();
+				StartArtAuraVFX(Step);
 			}
 			SetPhase(EJRPGActionPhase::Windup);
 			break;
@@ -1869,6 +1873,13 @@ void AJRPGBattlePawn::UpdatePlayback(int32 LogicFrame)
 			++StrikesPlayed;
 			break;
 		}
+	}
+
+	// O flash da aura de um SpecialStarter (o notify Art Aura Flash do clip)
+	if (ArtFlashFrame != INDEX_NONE && LogicFrame >= ArtFlashFrame)
+	{
+		ArtFlashFrame = INDEX_NONE;
+		FlashArtAura();
 	}
 
 	// Depois da caminhada: mira o corpo do alvo e não deixa o atacante dentro dele
@@ -1915,7 +1926,7 @@ void AJRPGBattlePawn::StopSpiritVFX(bool bImmediate)
 	SpiritVFX = FJRPGVFXHandle();
 }
 
-void AJRPGBattlePawn::StartArtAuraVFX()
+void AJRPGBattlePawn::StartArtAuraVFX(const FJRPGActionStep& Step)
 {
 	if (Combatant.Type == EJRPGCombatantType::Enemy || Combatant.Key.IsNone())
 	{
@@ -1926,40 +1937,129 @@ void AJRPGBattlePawn::StartArtAuraVFX()
 	{
 		return;
 	}
-	// A cor vem da linha do DT_VFX (a mesma receita nos três heróis)
+	// A cor é a de cada herói (as faixas de cor das receitas dele, como no Spirit); os tamanhos vêm daqui (SetEffectFloat)
 	FJRPGVFXContext Context;
 	Context.Instigator = this;
 	Context.Target = this;
 	const FString Key = Combatant.Key.ToString();
 
-	// A absorção, em todo starter: um efeito de uma vez, que termina sozinho
-	VFX->PlayEffectById(FName(*FString::Printf(TEXT("ArtAbsorb_%s"), *Key)), Context);
-
+	// A aura é uma só na ação inteira: o primeiro starter a abre, os seguintes a fazem crescer
 	if (!VFX->IsEffectPlaying(ArtAuraVFX))
 	{
-		// O primeiro starter da ação: a receita da aura já espera a absorção (o StartTime das camadas dela)
 		ArtAuraVFX = VFX->PlayEffectById(FName(*FString::Printf(TEXT("ArtAura_%s"), *Key)), Context);
-		ArtAuraPower = 1.0f;
-		VFX->SetEffectFloat(ArtAuraVFX, TEXT("AuraPower"), ArtAuraPower);
+		ArtAuraLevel = INDEX_NONE;
+		VFX->SetEffectFloat(ArtAuraVFX, TEXT("Flames"), 0.0f);
+		VFX->SetEffectFloat(ArtAuraVFX, TEXT("Charge"), 0.0f);
+		VFX->SetEffectFloat(ArtAuraVFX, TEXT("SparkRate"), 0.0f);
+	}
+
+	if (Step.Kind != EJRPGActionStepKind::SpecialStarter)
+	{
+		// O starter comum acende a aura pequena; uma aura já acesa (de um starter anterior) fica como está
+		if (ArtAuraLevel == INDEX_NONE && ArtAuraSizes.Num() > 0)
+		{
+			ArtAuraLevel = 0;
+			VFX->SetEffectFloat(ArtAuraVFX, TEXT("Size"), ArtAuraSizes[0]);
+			VFX->SetEffectFloat(ArtAuraVFX, TEXT("Height"), ArtAuraHeights.IsValidIndex(0) ? ArtAuraHeights[0] : 3.0f);
+			VFX->SetEffectFloat(ArtAuraVFX, TEXT("Charge"), 1.0f, 0.0f, 0.25f);
+			VFX->PulseEffectFloat(ArtAuraVFX, TEXT("Flames"), 1.3f, 0.2f, 0.4f, 1.0f);
+		}
 		return;
 	}
-	// Mais um starter na mesma ação: a aura cresce quando a absorção chega ao corpo
-	ArtAuraPower = FMath::Min(ArtAuraPower + ArtAuraPowerStep, ArtAuraPowerMax);
-	VFX->SetEffectFloat(ArtAuraVFX, TEXT("AuraPower"), ArtAuraPower, ArtAuraAbsorbSeconds, 0.25f);
+
+	// O SpecialStarter: a absorção acaba no flash (o notify do clip), com a aura que já houver acesa
+	ArtFlashFrame = ArtFlashFrameFor(Step);
+	const float SecondsToFlash = FMath::Max(static_cast<float>(ArtFlashFrame - StepClipStartFrame) / static_cast<float>(UBattleFormulas::StepsPerSecond), 0.1f);
+	const FName AbsorbId(*FString::Printf(TEXT("ArtAbsorb_%s"), *Key));
+	FJRPGVFXContext AbsorbContext = Context;
+	if (const UJRPGVFXRecipe* Recipe = UJRPGVFXSubsystem::FindRecipe(AbsorbId); Recipe && Recipe->CueTime > 0.0f)
+	{
+		AbsorbContext.TimeScale = FMath::Clamp(Recipe->CueTime / SecondsToFlash, 0.25f, 8.0f);
+	}
+	VFX->PlayEffectById(AbsorbId, AbsorbContext);
+	if (USoundBase* Sound = ArtAbsorbSound.IsNull() ? nullptr : ArtAbsorbSound.LoadSynchronous())
+	{
+		PlayNotifySound(Mesh, Sound, 1.0f, 1.0f, true, NAME_None);
+	}
+	if (ArtAuraLevel == INDEX_NONE)
+	{
+		// Sem chama ainda: só a linha da borda, carregando até o flash
+		VFX->SetEffectFloat(ArtAuraVFX, TEXT("Charge"), 1.0f, 0.0f, SecondsToFlash);
+	}
+}
+
+int32 AJRPGBattlePawn::ArtFlashFrameFor(const FJRPGActionStep& Step) const
+{
+	const int32 StepEnd = Action.StartFrame + Step.EndFrame;
+	const UAnimSequence* Clip = UJRPGArtSequenceLibrary::LoadHeroClip(Combatant.Key, Step.ClipName.ToString());
+	float FlashSeconds = 0.0f;
+	if (!Clip || StepClipStartFrame == INDEX_NONE || StepClipSpeed <= KINDA_SMALL_NUMBER
+		|| !UJRPGAnimNotify_AuraFlash::FindFlashTime(Clip, FlashSeconds))
+	{
+		return StepEnd;
+	}
+	// Depois do Loop Window o flash espera as voltas dele (o agachado do Vahn repete 5 vezes antes do quadro 18)
+	float LoopStart = 0.0f;
+	float LoopEnd = 0.0f;
+	int32 Loops = 0;
+	if (UJRPGAnimNotify_LoopWindow::FindLoopWindow(Clip, LoopStart, LoopEnd, Loops) && Loops < UJRPGAnimNotify_LoopWindow::Forever
+		&& FlashSeconds >= LoopEnd)
+	{
+		FlashSeconds += static_cast<float>(Loops) * (LoopEnd - LoopStart);
+	}
+	return StepClipStartFrame + FMath::RoundToInt(FlashSeconds / StepClipSpeed * static_cast<float>(UBattleFormulas::StepsPerSecond));
+}
+
+void AJRPGBattlePawn::FlashArtAura()
+{
+	UJRPGVFXSubsystem* VFX = UJRPGVFXSubsystem::Get(this);
+	if (!VFX || !VFX->IsEffectPlaying(ArtAuraVFX) || ArtAuraSizes.Num() == 0)
+	{
+		return;
+	}
+	FJRPGVFXContext Context;
+	Context.Instigator = this;
+	Context.Target = this;
+	VFX->PlayEffectById(FName(*FString::Printf(TEXT("ArtFlash_%s"), *Combatant.Key.ToString())), Context);
+	if (USoundBase* Sound = ArtFlashSound.IsNull() ? nullptr : ArtFlashSound.LoadSynchronous())
+	{
+		PlayNotifySound(Mesh, Sound, 1.0f, 1.0f, true, NAME_None);
+	}
+
+	// Um nível acima (o primeiro flash vai ao 1 com ou sem a aura pequena), parando no último
+	ArtAuraLevel = FMath::Min(FMath::Max(ArtAuraLevel, 0) + 1, ArtAuraSizes.Num() - 1);
+	VFX->SetEffectFloat(ArtAuraVFX, TEXT("Size"), ArtAuraSizes[ArtAuraLevel], 0.0f, 0.15f);
+	VFX->SetEffectFloat(ArtAuraVFX, TEXT("Height"), ArtAuraHeights.IsValidIndex(ArtAuraLevel) ? ArtAuraHeights[ArtAuraLevel] : 3.0f, 0.0f, 0.15f);
+	VFX->SetEffectFloat(ArtAuraVFX, TEXT("Charge"), 1.0f, 0.0f, 0.05f);
+	VFX->PulseEffectFloat(ArtAuraVFX, TEXT("Flash"), 1.0f, 0.05f, 0.25f);
+	VFX->PulseEffectFloat(ArtAuraVFX, TEXT("Flames"), 1.3f, 0.12f, 0.48f, 1.0f);
+	VFX->SetEffectFloat(ArtAuraVFX, TEXT("SparkRate"), 1.0f);
 }
 
 void AJRPGBattlePawn::StopArtAuraVFX(bool bImmediate)
 {
+	ArtFlashFrame = INDEX_NONE;
+	ArtAuraLevel = INDEX_NONE;
 	if (!ArtAuraVFX.IsValid())
 	{
 		return;
 	}
 	if (UJRPGVFXSubsystem* VFX = UJRPGVFXSubsystem::Get(this))
 	{
+		if (!bImmediate && VFX->IsEffectPlaying(ArtAuraVFX))
+		{
+			// O fim: uma piscada, a chama se desfaz (Dissolve) e as partículas se soltam; o FadeOutTime da receita leva o resto
+			VFX->PulseEffectFloat(ArtAuraVFX, TEXT("Flash"), 0.9f, 0.05f, 0.2f);
+			VFX->SetEffectFloat(ArtAuraVFX, TEXT("Dissolve"), 0.0f);
+			VFX->SetEffectFloat(ArtAuraVFX, TEXT("Dissolve"), 1.0f, 0.1f, 0.4f);
+			FJRPGVFXContext Context;
+			Context.Instigator = this;
+			Context.Target = this;
+			VFX->PlayEffectById(FName(*FString::Printf(TEXT("ArtDissipate_%s"), *Combatant.Key.ToString())), Context);
+		}
 		VFX->StopEffect(ArtAuraVFX, bImmediate);
 	}
 	ArtAuraVFX = FJRPGVFXHandle();
-	ArtAuraPower = 0.0f;
 }
 
 void AJRPGBattlePawn::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -2151,6 +2251,29 @@ void AJRPGBattlePawn::NoteHitResult(const FJRPGBattleEvent& Event)
 		return;
 	}
 	HitResults.Add(Event.HitIndex, Event.Type);
+	if (Event.Type == EJRPGBattleEventType::Damage)
+	{
+		// O efeito de impacto, no alvo. O som do golpe diz qual (o de corte tem linha própria no DT_VFX): se ele já chegou e
+		// espera o resultado, decide agora; senão espera uns quadros por ele (UpdateHeldSounds toca o padrão no prazo)
+		AJRPGBattlePawn* Victim = TargetPawn.Get();
+		const bool bLowHit = (Event.Flags & FJRPGBattleEventFlag::LowHit) != 0;
+		bool bPlayed = false;
+		for (const FJRPGHeldBattleSound& Held : HeldSounds)
+		{
+			if (Held.HitIndex == Event.HitIndex && PlayHitVFXForSound(Held.Spec.HitSound, Victim, bLowHit))
+			{
+				bPlayed = true;
+				break;
+			}
+		}
+		if (!bPlayed && Victim)
+		{
+			FPendingHitVFX& Pending = PendingHitVFX.FindOrAdd(Event.HitIndex);
+			Pending.Deadline = LastLogicFrame + HitVFXWaitFrames;
+			Pending.Victim = Victim;
+			Pending.bLowHit = bLowHit;
+		}
+	}
 	for (int32 i = HeldSounds.Num() - 1; i >= 0; --i)
 	{
 		if (HeldSounds[i].HitIndex == Event.HitIndex)
@@ -2242,6 +2365,14 @@ void AJRPGBattlePawn::HandleClipSound(const FJRPGBattleSoundSpec& Spec)
 	if (const EJRPGBattleEventType* Result = HitResults.Find(HitIndex))
 	{
 		// O resultado do golpe já saiu (o notify chegou depois da lógica): decide na hora
+		if (const FPendingHitVFX* Pending = PendingHitVFX.Find(HitIndex))
+		{
+			// O efeito de impacto esperava este som: se ele tem o efeito dele (o corte), é esse
+			if (PlayHitVFXForSound(Spec.HitSound, Pending->Victim.Get(), Pending->bLowHit))
+			{
+				PendingHitVFX.Remove(HitIndex);
+			}
+		}
 		ResolveSound(Spec, *Result);
 		return;
 	}
@@ -2266,5 +2397,125 @@ void AJRPGBattlePawn::UpdateHeldSounds(int32 LogicFrame)
 		{
 			HeldSounds.RemoveAt(i);
 		}
+	}
+	// Os efeitos de impacto que esperavam o som do golpe: o prazo passou sem um som com efeito próprio, sai o padrão
+	for (auto It = PendingHitVFX.CreateIterator(); It; ++It)
+	{
+		if (LogicFrame >= It.Value().Deadline)
+		{
+			PlayDefaultHitVFX(It.Value().Victim.Get(), It.Value().bLowHit);
+			It.RemoveCurrent();
+		}
+	}
+}
+
+bool AJRPGBattlePawn::PlayHitVFXForSound(const USoundBase* Sound, AJRPGBattlePawn* Victim, bool bLowHit)
+{
+	if (!Sound || !Victim || HitVFXId.IsNone())
+	{
+		return false;
+	}
+	UJRPGVFXSubsystem* VFX = UJRPGVFXSubsystem::Get(this);
+	const UJRPGVFXRecipe* Recipe = VFX ? UJRPGVFXSubsystem::FindRecipe(FName(*FString::Printf(TEXT("Hit_%s"), *Sound->GetName()))) : nullptr;
+	if (!Recipe)
+	{
+		return false;
+	}
+	FJRPGVFXContext Context;
+	Context.Instigator = this;
+	Context.Target = Victim;
+	Context.Location = HitVFXLocation(*Victim, bLowHit);
+	VFX->PlayEffect(Recipe, Context);
+	return true;
+}
+
+FVector AJRPGBattlePawn::HitVFXLocation(const AJRPGBattlePawn& Victim, bool bLowHit) const
+{
+	// A cápsula do alvo vai dos pés ao topo do corpo (o ator fica no centro dela)
+	const float Half = Victim.Capsule ? Victim.Capsule->GetScaledCapsuleHalfHeight() : 90.0f;
+	const float Radius = Victim.Capsule ? Victim.Capsule->GetScaledCapsuleRadius() : 35.0f;
+	// O lado de quem bate (o alvo está virado para ele)
+	FVector Toward = GetActorLocation() - Victim.GetActorLocation();
+	Toward.Z = 0.0;
+	if (!Toward.Normalize())
+	{
+		Toward = Victim.GetActorForwardVector();
+	}
+	FVector Point;
+	FVector Disc;
+	if (Victim.GetImpactOffset(bLowHit, Disc))
+	{
+		// O ponto do original (FUN_801DEA50): a posição do ator, que é a raiz do modelo (o chão), mais o registro de efeito do
+		// clip de reação. O brilho (código 0 / 9) é do braço de tabela, que gira o deslocamento pelo facing + 0x800: o "z"
+		// positivo do registro fica ATRÁS do alvo, para longe de quem bateu (o knockdown, que voa para trás, tem o z maior)
+		Point = Victim.Mesh ? Victim.Mesh->GetComponentLocation() : Victim.GetActorLocation() - FVector(0.0, 0.0, Half);
+		Point.Z += Disc.Z;
+		Point += -Toward * Disc.X + FVector::CrossProduct(FVector::UpVector, Toward) * Disc.Y;
+	}
+	else
+	{
+		Point = Victim.GetActorLocation();
+		Point.Z += Half * (2.0f * HitVFXHeight - 1.0f);
+	}
+	// Ajuste opcional para o lado de quem bate (0 = o ponto do disco)
+	Point += Toward * (Radius * HitVFXForward);
+	return Point;
+}
+
+bool AJRPGBattlePawn::GetImpactOffset(bool bLowHit, FVector& OutOffset) const
+{
+	const TArray<int32>* Units = nullptr;
+	if (Combatant.Type == EJRPGCombatantType::Enemy)
+	{
+		// O flinch do golpe (tag 2 o alto, 3 o baixo), senão o outro, senão o knockdown (4)
+		const int32 ReactionTags[] = { bLowHit ? 3 : 2, bLowHit ? 2 : 3, 4 };
+		for (const int32 Tag : ReactionTags)
+		{
+			const FJRPGEnemyActionData* Row = FindEnemyActionByTag(Tag);
+			if (Row && Row->ImpactOffset.Num() == 3)
+			{
+				Units = &Row->ImpactOffset;
+				break;
+			}
+		}
+	}
+	else
+	{
+		const TArray<int32>* Candidates[] = {
+			bLowHit ? &HeroReactionRow.FlinchLowImpact : &HeroReactionRow.FlinchHighImpact,
+			bLowHit ? &HeroReactionRow.FlinchHighImpact : &HeroReactionRow.FlinchLowImpact,
+			&HeroReactionRow.KnockdownImpact };
+		for (const TArray<int32>* Candidate : Candidates)
+		{
+			if (Candidate->Num() == 3)
+			{
+				Units = Candidate;
+				break;
+			}
+		}
+	}
+	if (!Units)
+	{
+		return false;
+	}
+	// Unidades do PS1 (de lado, para cima, para a frente) x a escala da malha, como o original
+	const float Scale = UnitsToCm * (Mesh ? static_cast<float>(Mesh->GetComponentScale().Z) : 1.0f);
+	OutOffset = FVector((*Units)[2], (*Units)[0], (*Units)[1]) * Scale;
+	return true;
+}
+
+void AJRPGBattlePawn::PlayDefaultHitVFX(AJRPGBattlePawn* Victim, bool bLowHit)
+{
+	if (!Victim || HitVFXId.IsNone())
+	{
+		return;
+	}
+	if (UJRPGVFXSubsystem* VFX = UJRPGVFXSubsystem::Get(this))
+	{
+		FJRPGVFXContext Context;
+		Context.Instigator = this;
+		Context.Target = Victim;
+		Context.Location = HitVFXLocation(*Victim, bLowHit);
+		VFX->PlayEffectById(HitVFXId, Context);
 	}
 }

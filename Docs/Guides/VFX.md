@@ -14,7 +14,7 @@ effect fires (see [What comes from the original](#what-comes-from-the-original))
 | `FJRPGVFXLayer` and friends | `Public/VFX/JRPGVFXTypes.h` | The layer, its animated tracks, the firing context, the `DT_VFX` row |
 | `UJRPGVFXSubsystem` | `Public/VFX/JRPGVFXSubsystem.h` | Plays recipes: spawns, anchors, animates and pools the layers |
 | `UJRPGAnimNotify_VFX` | `Public/VFX/JRPGAnimNotify_VFX.h` | Fires a recipe from a frame of a clip |
-| `JRPG.VFX.Tracks`, `JRPG.VFX.RecipeLength` | `Private/Tests/JRPGVFXTests.cpp` | Tests of the pure-data part (eases, tracks, recipe length) |
+| `JRPG.VFX.Tracks`, `JRPG.VFX.RecipeLength` | `Private/Tests/JRPGVFXTests.cpp` | Tests of the pure-data part (eases, tracks, keys, recipe length) |
 
 The plugin ships **no** effect assets. Recipes, materials, meshes and Niagara systems live in the project.
 
@@ -53,6 +53,7 @@ Create one in the Content Browser: **Miscellaneous › Data Asset › JRPGVFXRec
 | `bLooping` | The effect stays until `StopEffect` (an aura, a status). See [Looping](#looping-and-stopping) |
 | `FadeOutTime` | On a soft stop, how long the effect takes to disappear |
 | `MinPlayTime` | The least the effect plays: a soft stop asked earlier waits until then before fading. An immediate stop does not wait. `0` = none |
+| `CueTime` | The moment that marks the recipe (the Absorb flash). A caller can set `Context.TimeScale = CueTime / seconds` so that moment falls on a game event. `0` = none |
 | `FadeParameter` | The scalar the `Mesh` layers' materials receive during the fade (`JRPGVFXFade`, 1 → 0) |
 | `Layers` | The layers, in any order |
 
@@ -68,6 +69,14 @@ Every layer has a `Label` (only for reading the recipe), a `Type`, a `StartTime`
 | `Light` | A point light, no shadows | `LightColor`, `LightIntensity` (unitless), `LightRadius` | `Intensity`, `Radius`, `Color` |
 | `BodyParam` | Nothing new | — | Material parameters on **every mesh of the anchor actor** |
 | `CameraShake` | A shake, fired once at `StartTime` | `ShakePreset`, `ShakeScale` | — |
+| `PostProcess` | A full-screen post-process material | `Material` (Material Domain = Post Process) | Material parameters |
+
+A `PostProcess` layer is for effects drawn around the silhouette of the anchor actor (the anime aura): while it
+lives, the subsystem turns **Render CustomDepth Pass** on for every mesh of the anchor actor and off again when
+the last layer asking for it ends (a mesh that already had the pass on is left alone). The material is a
+blendable on an unbound post-process component, so it adds to the post-process volumes of the level instead of
+replacing them. `Placement`, `Socket` and `Offset` do not apply. On a soft stop it receives `FadeParameter`,
+like a `Mesh` layer.
 
 New layer types always go at the **end** of `EJRPGVFXLayerType` (it is serialized in the recipes).
 
@@ -80,6 +89,7 @@ New layer types always go at the **end** of `EJRPGVFXLayerType` (it is serialize
 | `Socket` | A socket or bone of the anchor actor. With it, `Placement` is ignored. A socket that does not exist falls back to `Placement` |
 | `bAttach` | The layer follows the anchor. Off = it stays where it was born |
 | `Offset` | Position, rotation and scale relative to the anchor point. The yaw follows the anchor actor's yaw |
+| `bFollowBody` | Each frame the layer's XY follows the centre of the anchor's skeletal-mesh bones (Z stays where it was born). Niagara layers also get the float user parameter `BodyHeightScale` (body centre height now / at the start; < 1 when crouching) |
 | `bScaleByAnchorSize` + `ReferenceSize` | Scales the layer by the anchor's XY bounds radius divided by `ReferenceSize`, so the same tornado grows on a big monster |
 | `bRandomYaw` | A random yaw per play, from the subsystem's cosmetic stream |
 
@@ -95,6 +105,12 @@ A track animates one parameter from `From` to `To` over the layer's life.
   the play (the element, the hero's colour).
 
 `Pulse` goes to `To` in the middle of the layer and back to `From` at the end.
+
+**Keys.** A scalar track can instead carry `Keys`: a list of `Time` (seconds since the layer started) and
+`Value`, in time order. With keys, `From`, `To` and `Curve` are ignored; `Ease` applies between each pair of
+keys; the value holds before the first key and after the last one; and the track **does not repeat** in a
+looping layer. This is how a parameter rises, holds and falls on one layer (`Absorb` 0 → 1 → 1 → 0), and how
+an aura lights up once and stays (`Flames` ending at 1 on a looping layer). It is the Lab's `animate.keys`.
 
 Reserved scalar names, which never reach a material or a user parameter:
 
@@ -143,11 +159,19 @@ VFX->PlayEffectById(TEXT("TornadoFlame"), Context);   // by DT_VFX row
 |---|---|
 | `PlayEffect(Recipe, Context)` | Returns a handle. Layers with `StartTime 0` enter on the same frame |
 | `PlayEffectById(Id, Context)` | Looks the recipe up in `DT_VFX` (`FJRPGVFXRow`: RowName = id, `Recipe` = soft reference) |
+| `SetEffectFloat(Handle, Name, Value, Delay, BlendTime)` | Drives a float on every Niagara, Mesh and PostProcess layer of a playing effect; beats a track of the same name. Real clock |
+| `PulseEffectFloat(Handle, Name, Peak, Rise, Fall, Rest, Delay)` | Same targets: up to `Peak` in `Rise`, back to `Rest` in `Fall`, and stays there (a blink, a flame burst) |
 | `StopEffect(Handle, bImmediate)` | Soft (fades over `FadeOutTime`) or at once |
 | `StopAllEffects(bImmediate)` | End of a fight, a scene change |
 | `IsEffectPlaying(Handle)` | |
 
 `DT_VFX` follows the other tables: `/Game/Data/DT_VFX`, falling back to the plugin's `Data/` folder.
+
+**`Context.TimeScale`** (default 1) is the speed of the recipe's timeline: `StartTime`, `Duration`, `Keys` and
+`MinPlayTime` are all read on it (2 = everything happens in half the time). Niagara layers that end simulate at
+the same speed (`SetCustomTimeDilation`); looping layers stay at 1, so an aura does not flicker faster.
+`FadeOutTime` and `SetEffectFloat` stay on the real clock. Tracks without `Keys` on a looping layer repeat
+every `GetLength()` of recipe time, so they also repeat faster.
 
 **From a clip.** Add the **Battle VFX** notify (`UJRPGAnimNotify_VFX`) on the frame. It takes a `Recipe`,
 or an `EffectId` when there is no recipe set. Whoever plays the clip is the instigator. With
@@ -287,6 +311,145 @@ Traps found while porting:
   `set_properties`; empty or grow first, then set. A Dynamic Parameter output only connects after its output
   names were queried once.
 
+### From the VFX Lab: the hit impacts
+
+Lab scenes `HitPunch` and `HitSlash` → `/Game/Legaia/VFX/Hit/`. `DT_VFX` rows `HitPunch` and `HitSlash`.
+
+| Lab layer | Unreal | Notes |
+|---|---|---|
+| `Linhas` (`HitLine`) | emitter `Linhas`, `M_HitLine` | 10 sprites (9 in the slash), 240–650 cm, spread evenly by Sprite Rotation |
+| `Faiscas`, `RiscosLongos` (`SpiritSpark`) | emitters of the same name, `M_SpiritSpark` | Velocity Aligned, stretched 7× and 14× |
+| `Bolinhas`, `Brasas` (`SpiritOrb`) | emitters of the same name, `M_SpiritOrb` | `Brasas` twinkles |
+| `Corte` (`HitCut`, slash only) | emitter `Corte`, `M_HitCut` | 1 sprite, 200 cm |
+
+`NS_HitPunch` and `NS_HitSlash` are one-shot bursts, all **GPU Compute**, in **world space**: the particles
+stay where the hit happened. The system's origin is the hit point; the recipes (`VFX_HitPunch`,
+`VFX_HitSlash`) anchor it on `Location`, not attached, and whoever plays them gives the point.
+
+**Where the hit lands.** The original does not compute it from the body: the impact burst is an effect record
+(code `0` / `9`) of the **defender's reaction clip**, with an offset authored per monster and per reaction
+(`BATTLE_RE_SWEEP.md` §8.2). The generators read it: `ImpactOffset` on the reaction rows of `DT_EnemyActions`
+(tags 2, 3, 4) and `FlinchHighImpact` / `FlinchLowImpact` / `KnockdownImpact` on `DT_HeroReactions`. Three
+numbers in PS1 units, actor space: sideways, up from the floor, forward. Gimard `(0, 330, 30)` is 143 cm up;
+Vahn takes a high blow at `(7, 359, 128)` and a low one at `(0, 245, 117)`. The pawn uses the point of the
+reaction the blow causes (the event's `LowHit` flag), × `UnitsToCm` × the mesh scale, measured from the **root of
+the target's model** (the original's actor position is its floor point). The burst is spawned by the walker's
+table arm, which rotates the offset by the facing **+ 0x800**: the record's positive "forward" ends up
+**behind** the target, away from the attacker (the knockdown, which flies backwards, has the larger value;
+its floor ring, a direct-arm record with no half turn, is at `z = -450`). `HitVFXForward` (default 0) moves
+the point toward the attacker in fractions of the capsule radius. A target with no point in the tables falls
+back to `HitVFXHeight` (0.65 of its capsule). The Lab's `origin` is the same idea, in front of the chest. `M_HitLine` and `M_HitCut` have **Disable Depth Test** on (the Lab's `depthTest: false`).
+The sparks and orbs reuse the Spirit materials; each layer's own `Intensity` / `CoreSize` is a scalar in the
+renderer's Material Parameters, and the fire palette is the system's `User.ColorCore` / `ColorMain` /
+`ColorEdge` defaults (a recipe colour track recolours it). `User.Opacity` (0.7) multiplies the alpha of every
+particle; a recipe scalar track `Opacity` changes it.
+
+The Lab's `explode` motion: `Position = Origin + Dir × (r0 + D × (1 − (1 − a)^k))`. `Dir` mixes a random
+direction on the sphere with one on the plane facing the camera (`planar`). The camera comes from the stock
+dynamic input `ReturnCameraPosition`, written to `Emitter.CamPos` in Emitter Update; the plane is built from the
+direction hit point → camera, so it does not work in split screen (the dynamic input says so). `rotate: even`
+is `(UniqueID mod N + 0.5 ± 0.3) / N × 360` on `Particles.SpriteRotation`.
+
+**In the fight.** `AJRPGBattlePawn` plays the impact on the target of every hit of its action that connects
+(`Damage`). A `Block` or a `Miss` plays none, the same rule as the impact sound. Which one:
+
+- The default is the pawn's `HitVFXId`, `HitPunch`.
+- A hit whose impact sound has its own `DT_VFX` row plays that row instead. The row is named
+  `Hit_<sound asset name>`: `Hit_SW_Battle_Cue04` → `VFX_HitSlash`. The sound is what tells a blade from a fist,
+  so the cut is chosen per sound, and a new cutting sound only needs one more row.
+
+The logic often resolves the hit a frame or two before the clip's sound notify arrives, so the effect waits
+`HitVFXWaitFrames` (2 logic frames) for the sound before falling back to the default.
+
+Rows so far, told by ear among the common battle sounds: the cuts are `SW_Battle_Cue03`, `04`, `05`, `0B`, `0C`
+and `4B`. `Cue06` to `Cue10`, `Cue0A` and `Cue4C` are normal hits and have no row. The hero swing clips imported
+so far play `Cue07` / `08` / `09`, whatever the weapon, so a hero's knife gets the normal hit.
+
+`JRPG.VFX.Play HitSlash` plays one on the player's pawn.
+
+### From the VFX Lab: the Absorb
+
+Lab scene `Absorb` → `/Game/Legaia/VFX/Absorb/`. `DT_VFX` row `Absorb`. It replaced the first Art aura
+(`/Game/Legaia/VFX/ArtAura/`, deleted).
+
+| Lab layer | Unreal | Notes |
+|---|---|---|
+| `Chao` (`AbsorbGround`, plane) | `M_AbsorbGround` on `/Engine/BasicShapes/Plane`, scale 6, 2 cm up | Keys `Absorb`, `Pulse` |
+| `ChaoVolume` (`AbsorbDome`, low cone) | `M_AbsorbDome` on `SM_AbsorbDome` (290 → 22 cm radius, 32 cm) | WPO wobble 0.03; keys `Absorb` |
+| `Faixas`, `FaixasLongas`, `FaixasChao` (`AbsorbStreak`, ribbons) | 3 emitters of `NS_AbsorbPull`, `M_AbsorbStreak` | **CPU** (see below) |
+| `Particulas`, `FaiscasSugadas` | 2 emitters of `NS_AbsorbPull` | GPU, motion `inward` |
+| `Aura` (`AnimeAura`, post) | `M_AnimeAura`, a `PostProcess` layer | Keys `Charge`, `Flash`, `Flames` |
+| `Estouro`, `BolinhasEstouro`, `FaiscasAura`, `LinguasSoltas` | `NS_AbsorbAura` | GPU, motion `rise`; starts at the flash |
+
+**Recipe.** `VFX_Absorb`, looping, `FadeOutTime` 0.6: energy is pulled in for 3.8 s, the body flashes, and the
+flame aura stays until `StopEffect`. Ground 0 → 4.8 s, dome and `NS_AbsorbPull` 0 → 3.8 s, `NS_AbsorbAura`
+from 3.8 s, the aura layer for the whole effect; the Lab's `animate.keys` are the tracks' `Keys`, with the
+same times. A `Light` layer on the chest stands in for the rim light the Lab puts on its dummy.
+
+**In the fight: the Art aura.** One aura per action, and it builds up. `AJRPGBattlePawn::StartArtAuraVFX`
+runs when a starter step begins; four `DT_VFX` rows per hero (`<Key>` = Vahn, Noa, Gala), all in
+`/Game/Legaia/VFX/Absorb/`:
+
+| Row | Recipe | What it plays |
+|---|---|---|
+| `ArtAura_<Key>` | `VFX_ArtAura_<Key>` | The aura, looping: the `M_AnimeAura` layer and `NS_ArtAuraLoop` (sparks and loose tongues, `SparkRate` 0/1). Its size, flash and flames come from the pawn (`SetEffectFloat` / `PulseEffectFloat`) |
+| `ArtAbsorb_<Key>` | `VFX_ArtAbsorb_<Key>` | One `SpecialStarter`: ground, dome, `NS_AbsorbPull` and the chest light. `CueTime` 3.8 |
+| `ArtFlash_<Key>` | `VFX_ArtFlash_<Key>` | The flash: `NS_ArtAuraBurst` and a light pulse |
+| `ArtDissipate_<Key>` | `VFX_ArtDissipate_<Key>` | The end: `NS_ArtAuraDissipate`, particles thrown off the body |
+
+- **Levels.** `ArtAuraSizes` / `ArtAuraHeights` on the pawn: level 0 = `ArtStarter` (0.015 / 3), level 1 = the first
+  flash (0.043 / 3), level 2 = the second flash on (0.055 / 3.4). An `ArtStarter` opens the aura at level 0, or
+  leaves it alone. A `SpecialStarter` plays the absorb with whatever aura is lit (with none, it opens one with only
+  the rim line charging, `Charge` 0 → 1), and at the flash the aura goes one level up (`Size` / `Height` blend in
+  0.15 s, `Flash` pulse, `Flames` 1.3 → 1, `SparkRate` 1).
+- **The flash frame** comes from the **Art Aura Flash** notify (`UJRPGAnimNotify_AuraFlash`) on the hero's
+  `AS_<Hero>_Battle_SpecialStarter` clip: Vahn frame 18, Noa 12, Gala 12. It is read like the hit notifies: clip
+  seconds, plus the `Loop Window` turns when the flash is after it, over the step's play speed. Without the notify the
+  flash comes at the end of the step. The absorb is stretched to it: `TimeScale = CueTime / seconds to the flash`
+  (clamped to 0.25 – 8).
+- **The end** (`FinishAction`): a `Flash` pulse, `Dissolve` 0 → 1 (delay 0.1 s, 0.4 s), `ArtDissipate_<Key>`, and a
+  soft stop with the recipe's `FadeOutTime` 0.7.
+- **Sounds** (on the pawn, soft references, empty = none): `ArtAbsorbSound` plays when a `SpecialStarter` starts the
+  absorb, and `ArtFlashSound` plays at its flash. The end blink is silent. The defaults are `SW_Battle_StarterAbsorb` /
+  `SW_Battle_StarterFlash` in `/Game/Legaia/Battle/Sounds/Common/`.
+- **Following the body.** Every spatial layer has `bFollowBody`: the battle pawn only moves at the end of each clip,
+  the body moves inside it. `NS_AbsorbPull` scales its target height by `BodyHeightScale`, so the energy goes down
+  with the hero's crouch.
+- **`M_AnimeAura` `Cover`** (0.6): the background is darkened under the aura before its colour is added
+  (`Scene × (1 − Cover × A) + RGB × A`). Pure additive (0, the Lab's look) washes out on a bright floor.
+- Colours: constant `ColorCore` / `ColorMain` / `ColorEdge` tracks with the hero's Spirit palette. The Lab scene for
+  the whole cycle is `scenes/ArtAura.json`.
+- Built by `.claude/unreal-mcp/vfxport/art.py`.
+
+**Ribbons.** The Niagara Ribbon renderer does not run on GPU emitters, so the three ribbon emitters are CPU.
+A ribbon is 16 particles in a row (`RibbonID = UniqueID / 16`, an `int32`: the renderer's `RibbonIdBinding`
+has to be retyped from the default `NiagaraID`; `RibbonLinkOrder = UniqueID mod 16`). Each particle stores how
+long until its ribbon is complete, so the 16 share one clock, and sits at `ribbonAt(age − k × trail)`, the
+same formula as the Lab's `VS_RIBBON`: the ribbon is born collapsed at the start point, curves with the
+spiral, and the tail is pulled in after the head arrives. The material reads `UV` swapped (V across, U along)
+and the per-ribbon random from Dynamic Parameter `Param2`.
+
+**`inward` and `until`.** `e = a^accel`; radius `lerp(r0, target, e)`, angle `+ swirl × e` (one in four turns
+the other way × 0.6), height toward the target plus an arc `× sin(π e)`. The Lab's `until` (only spawn what
+arrives before the flash) is a spawn window plus a lifetime clamp `min(life, until − Emitter.Age)`: the last
+particles are faster instead of missing. These emitters use `Loop Duration` 1000 so `Emitter.Age` never wraps.
+
+**The aura.** `M_AnimeAura` is a Post Process material at **Scene Color Before Bloom**: Emissive =
+`PostProcessInput0` + the Custom node's RGB × A × `JRPGVFXFade`. `UV` = Screen Position (ViewportUV),
+`TexelSize` = the `InvSize` of a SceneTexture **CustomDepth** node; a SceneTexture **SceneDepth** node is wired
+to an unused extra input (`SceneDepthRef`) only so the compiler declares that texture for the
+`SceneTextureLookup` calls in the code. `Charge`, `Flames` and `Flash` default to 0: the material draws nothing
+until a recipe drives it. The aura is in screen space, so `Size` is a fraction of the screen height, not a
+world size.
+
+More traps found here:
+
+- A Simulate session is already ~2 s old when `StartPIE` returns: an effect shorter than that has ended before
+  the first capture. Delay the bursts for a test, or capture a sequence.
+- `SetEmitterData` with `{"Name": ...}` renames an emitter; `CreateNiagaraSystem` with an existing system as
+  template copies it whole. Copying `NS_SpiritCharge` and rewriting its emitters is faster than building from
+  the stock templates.
+
 ---
 
 ## Authoring effects with Claude
@@ -371,6 +534,20 @@ No texture, model or look is taken from the disc for effects.
 
 - Checked: the two automation tests pass (`JRPG.VFX`); a recipe with Niagara, mesh and light layers plays
   through the subsystem in Simulate.
+- Checked in Simulate (2026-11-16): the hit impacts, the Absorb ground, dome, ribbons and particles, and
+  `M_AnimeAura` on a post-process volume.
+- Checked in PIE (2026-11-16): `VFX_Absorb` with its `Keys` tracks and the `PostProcess` aura layer (the rim line
+  grows with `Charge`, the flash, the flames stay; Custom Depth is turned on and off by the layer), and the
+  `JRPG.VFX.Tracks` cases pass.
+- Known limit: `Placement` reads `GetActorBounds` of the whole actor. On `BP_FieldCharacter` the bounds are huge
+  (about 3200 × 2000 × 3400 cm), so `BoundsBottom` lands ~13 m from the pawn and the mesh, light and Niagara layers
+  of any recipe (Spirit included) play off screen when `JRPG.VFX.Play` is used in the field. Battle pawns are not
+  measured yet.
+- To check, after the build that carries it: the hit impacts in a real fight (position on the target, the cut
+  rows).
+- To check, after the build that carries `bFollowBody`, `PulseEffectFloat` and the Art Aura Flash notify: the Art
+  aura in a real fight (small aura, absorb with it lit, the flash on the notify frame, the second Hyper growing it,
+  the end blink and dissolve, the absorb following the crouch).
 - To check: the Spirit aura in a real fight (after the build that carries the pawn hook).
 - To check: a `Battle VFX` notify plays in the animation editor's preview. The subsystem is enabled for
   preview worlds for this; it is the least certain part of the code.

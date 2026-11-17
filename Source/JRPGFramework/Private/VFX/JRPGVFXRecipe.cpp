@@ -20,6 +20,30 @@ float FJRPGVFXScalarTrack::Evaluate(float Alpha) const
 	return FMath::Lerp(From, To, Blend);
 }
 
+float FJRPGVFXScalarTrack::EvaluateKeys(float Seconds) const
+{
+	if (Keys.IsEmpty())
+	{
+		return 0.0f;
+	}
+	if (Seconds <= Keys[0].Time)
+	{
+		return Keys[0].Value;
+	}
+	for (int32 Index = 1; Index < Keys.Num(); ++Index)
+	{
+		const FJRPGVFXKey& Next = Keys[Index];
+		if (Seconds < Next.Time)
+		{
+			const FJRPGVFXKey& Previous = Keys[Index - 1];
+			const float Span = Next.Time - Previous.Time;
+			const float Blend = Span > UE_KINDA_SMALL_NUMBER ? JRPGVFX::EvaluateEase(Ease, (Seconds - Previous.Time) / Span) : 1.0f;
+			return FMath::Lerp(Previous.Value, Next.Value, Blend);
+		}
+	}
+	return Keys.Last().Value;
+}
+
 FLinearColor FJRPGVFXColorTrack::Evaluate(float Alpha, const FLinearColor& ContextColor) const
 {
 	const FLinearColor Value = FMath::Lerp(From, To, JRPGVFX::EvaluateEase(Ease, Alpha));

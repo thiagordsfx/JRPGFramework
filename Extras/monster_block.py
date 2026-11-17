@@ -37,6 +37,19 @@ def dump_block(tool, archive, monster_id, workdir):
         return f.read()
 
 
+def impact_offset(entry):
+    """O ponto do brilho do golpe de uma entrada de reação: o registro de efeito de código 0 (ou 9, o das Arts) da
+    trilha +0x14..+0x53 (oito registros de 8 bytes: u8 quadro, u8 código, i16 x, i16 y, i16 z; quadro 0 termina).
+    [x, y, z] em unidades do PS1, no espaço do ator (x de lado, y para cima, z para a frente); [] se a entrada não tem."""
+    for k in range(8):
+        at = 0x14 + 8 * k
+        if at + 8 > len(entry) or entry[at] == 0:
+            break
+        if entry[at + 1] in (0, 9):
+            return list(struct.unpack_from("<hhh", entry, at + 2))
+    return []
+
+
 def parse_block(block):
     """O registro e as ações de um bloco: {element, target_class, magic, actions: [...]}."""
     count = block[ACTION_COUNT_AT]
@@ -65,6 +78,7 @@ def parse_block(block):
             # clip (o quanto o clip deixa o corpo de onde começou, ao longo da direção), os dois i16
             "root_speed": struct.unpack_from("<h", entry, 0x0C)[0],
             "end_step": struct.unpack_from("<h", entry, 0x0E)[0],
+            "impact_offset": impact_offset(entry),
         })
     return {
         "element": block[0x1D],

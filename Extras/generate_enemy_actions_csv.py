@@ -43,7 +43,7 @@ for _stream in (sys.stdout, sys.stderr):
 TABLE = "DT_EnemyActions"
 ROOT = "/Game/Legaia/Battle/Enemies"
 COLUMNS = ["Enemy", "ArchiveID", "ActionIndex", "Tag", "Clip", "Anim", "Power", "HitFrames",
-           "AGLCost", "Gate", "Rate", "StatusSelector", "FrameCount", "RootSpeed", "EndStep"]
+           "AGLCost", "Gate", "Rate", "StatusSelector", "FrameCount", "RootSpeed", "EndStep", "ImpactOffset"]
 # Preenchidas fora do gerador quando o lote não conhece o monstro: mantidas se já existiam
 MANUAL_COLUMNS = ["Anim"]
 
@@ -118,6 +118,7 @@ def main():
                     "AGLCost": a["agl_cost"], "Gate": a["gate"], "Rate": a["rate"],
                     "StatusSelector": a["status"], "FrameCount": a["frames"],
                     "RootSpeed": a["root_speed"], "EndStep": a["end_step"],
+                    "ImpactOffset": lt.ue_array(a["impact_offset"]),
                 })
 
     # Trabalho manual sobrevive à regeneração

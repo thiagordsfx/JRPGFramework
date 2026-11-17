@@ -25,7 +25,13 @@ enum class EJRPGVFXLayerType : uint8
 	/** Nada novo na cena: as faixas escrevem nos materiais do corpo do ator âncora (tint do golpe, dissolve, aura). */
 	BodyParam,
 	/** Um shake de câmera (UCameraSubsystem), disparado uma vez no StartTime. */
-	CameraShake
+	CameraShake,
+	/**
+	 * Um material de pós-processo (Material Domain = Post Process) na tela inteira, que lê a silhueta do ator âncora pela
+	 * Custom Depth (a aura anime). As faixas escrevem no material; o Render CustomDepth Pass das malhas do ator fica ligado
+	 * enquanto a camada vive.
+	 */
+	PostProcess
 };
 
 /** Em quem a camada se apoia. */
@@ -64,9 +70,22 @@ enum class EJRPGVFXEase : uint8
 	Pulse
 };
 
+/** Uma chave de uma faixa escalar: o valor num instante, em segundos desde o começo da camada. */
+USTRUCT(BlueprintType)
+struct JRPGFRAMEWORK_API FJRPGVFXKey
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX", meta = (ClampMin = "0.0"))
+	float Time = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX")
+	float Value = 0.0f;
+};
+
 /**
  * Um parâmetro escalar animado ao longo da camada. Para onde vai depende do tipo dela: user parameter (Niagara), parâmetro
- * de material (Mesh, BodyParam). Nomes reservados, que não vão a material nenhum:
+ * de material (Mesh, BodyParam, PostProcess). Nomes reservados, que não vão a material nenhum:
  *   "Scale"     — multiplica a escala da camada (Niagara, Mesh, Light);
  *   "Intensity" — multiplica a intensidade (Light);
  *   "Radius"    — multiplica o raio de atenuação (Light).
@@ -92,7 +111,21 @@ struct JRPGFRAMEWORK_API FJRPGVFXScalarTrack
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX")
 	TObjectPtr<UCurveFloat> Curve;
 
+	/**
+	 * Opcional: chaves em segundos desde o começo da camada, em ordem de tempo (sobe, segura, desce). Com elas From, To e
+	 * Curve não valem: o Ease vale entre cada par de chaves, o valor fica parado antes da primeira e depois da última, e a
+	 * faixa não repete numa camada em loop (a aura que acende uma vez e fica).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX", meta = (TitleProperty = "Time"))
+	TArray<FJRPGVFXKey> Keys;
+
 	float Evaluate(float Alpha) const;
+
+	/** O valor das Keys no instante Seconds (segundos desde o começo da camada). Sem chaves: 0. */
+	float EvaluateKeys(float Seconds) const;
+
+	/** O valor da faixa: pelas Keys se houver, senão por From/To no tempo Alpha (0..1) da camada. */
+	float EvaluateAt(float Alpha, float Seconds) const { return Keys.Num() > 0 ? EvaluateKeys(Seconds) : Evaluate(Alpha); }
 };
 
 /** Um parâmetro de cor animado ao longo da camada (user parameter LinearColor no Niagara, vetor no material; na Light, "Color"). */
@@ -174,6 +207,16 @@ struct JRPGFRAMEWORK_API FJRPGVFXLayer
 		meta = (EditCondition = "Type != EJRPGVFXLayerType::CameraShake && Type != EJRPGVFXLayerType::BodyParam"))
 	FTransform Offset;
 
+	/**
+	 * A camada segue o corpo do ator âncora, não a raiz dele: a cada frame o XY dela vai para o centro dos ossos da malha
+	 * esquelética (o Z fica onde nasceu, no chão). Na luta o ator só anda no fim de cada clip e o corpo se move dentro dele (a
+	 * investida, o agachado). Numa camada Niagara escreve também o user parameter float "BodyHeightScale": a altura do centro
+	 * agora / a altura dele quando a camada entrou (abaixado < 1), para o alvo da absorção descer junto.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Placement",
+		meta = (EditCondition = "Type != EJRPGVFXLayerType::CameraShake && Type != EJRPGVFXLayerType::BodyParam && Type != EJRPGVFXLayerType::PostProcess"))
+	bool bFollowBody = false;
+
 	/** Escala a camada pelo tamanho do ator âncora: raio do volume dele (em XY) / ReferenceSize. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Placement",
 		meta = (EditCondition = "Type != EJRPGVFXLayerType::CameraShake && Type != EJRPGVFXLayerType::BodyParam"))
@@ -206,8 +249,12 @@ struct JRPGFRAMEWORK_API FJRPGVFXLayer
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mesh", meta = (EditCondition = "Type == EJRPGVFXLayerType::Mesh"))
 	TObjectPtr<UStaticMesh> Mesh;
 
-	/** O material em todos os slots da malha; vazio = os da própria malha. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mesh", meta = (EditCondition = "Type == EJRPGVFXLayerType::Mesh"))
+	/**
+	 * Mesh: o material em todos os slots da malha; vazio = os da própria malha.
+	 * PostProcess: o material de pós-processo (obrigatório).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mesh",
+		meta = (EditCondition = "Type == EJRPGVFXLayerType::Mesh || Type == EJRPGVFXLayerType::PostProcess"))
 	TObjectPtr<UMaterialInterface> Material;
 
 	// --- Light ---
@@ -264,6 +311,14 @@ struct JRPGFRAMEWORK_API FJRPGVFXContext
 	/** Escala o efeito inteiro. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX")
 	float Scale = 1.0f;
+
+	/**
+	 * A velocidade da linha de tempo da receita (StartTime, Duration, Keys, MinPlayTime): 2 = tudo acontece na metade do
+	 * tempo. As camadas Niagara que terminam simulam nesta velocidade (time dilation); as que ficam em loop seguem a 1. O
+	 * FadeOutTime e o SetEffectFloat seguem o relógio real. É como a absorção cabe no SpecialStarter (UJRPGVFXRecipe::CueTime).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX", meta = (ClampMin = "0.01"))
+	float TimeScale = 1.0f;
 };
 
 /** O recibo de um PlayEffect, para parar um efeito em loop. Id 0 = nenhum. */
